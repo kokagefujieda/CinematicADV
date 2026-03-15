@@ -1,0 +1,46 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "CinematicADV",
+	"Description": "Cinematic ADV engine for Unreal Engine. Adds click-to-advance, backlog, skip, auto mode, and save/load to Sequencer-based cinematics.",
+	"Category": "Sequencer",
+	"CreatedBy": "kokage",
+	"CreatedByURL": "mailto:kokage.fujieda84@gmail.com",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "mailto:kokage.fujieda84@gmail.com",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"EngineVersion": "5.7.0",
+	"Installed": false,
+	"Plugins": [
+		{
+			"Name": "SequencerSubtitles",
+			"Enabled": true
+		},
+		{
+			"Name": "EnhancedInput",
+			"Enabled": true
+		}
+	],
+	"Modules": [
+		{
+			"Name": "CinematicADV",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [
+				"Win64"
+			]
+		},
+		{
+			"Name": "CinematicADVEditor",
+			"Type": "Editor",
+			"LoadingPhase": "PostEngineInit",
+			"PlatformAllowList": [
+				"Win64"
+			]
+		}
+	]
+}
