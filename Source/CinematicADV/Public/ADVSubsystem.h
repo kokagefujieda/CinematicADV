@@ -355,6 +355,8 @@ private:
 	void FindLineInfo(UMovieSceneSequencePlayer* Player, uint32 SlotID, FString& OutLineKey, USoundBase*& OutVoice) const;
 
 	void AddBacklogEntryInternal(const FADVBacklogEntry& Entry);
+	/** Leaving / entering a wait: forget what was recorded at the wait. */
+	void ResetBacklogWaitState();
 
 	// Fast forward
 	void OnFastForwardPressed();
@@ -387,6 +389,9 @@ private:
 	// Playback control
 	void PlayToSectionEnd();
 	bool IsAtSectionEnd(UMovieSceneSequencePlayer* Player) const;
+
+	/** Where a Stop wait waits: the last frame of the section (the section end itself is never evaluated). */
+	FFrameTime GetWaitPosition() const;
 	void JumpPastSection();
 	void LoopToStart();
 
@@ -467,6 +472,15 @@ private:
 
 	/** Subtitle sections already recorded at the current wait (a Loop restarting them adds nothing). */
 	TSet<int32>  BacklogSlotsAtWait;
+
+	/** Lines recorded at the current wait (saved, so that resuming there does not add them again). */
+	int32        BacklogLinesAtWait = 0;
+
+	/** After loading: the lines of the restored wait, not recorded again while still at that wait. */
+	TArray<FADVBacklogEntry> RestoredWaitLines;
+
+	/** Restoring a loaded game (the lines shown by the jump are already in the restored backlog). */
+	bool         bRestoringGame = false;
 
 	TWeakObjectPtr<USubtitleSubsystem> BoundSubtitles;
 	TWeakObjectPtr<UAudioComponent>    BacklogVoiceComponent;

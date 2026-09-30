@@ -46,6 +46,10 @@ public:
 	UPROPERTY(SaveGame)
 	TArray<FADVBacklogEntry> Backlog;
 
+	/** How many of the last backlog lines were shown at the saved wait (not added again when resuming there). */
+	UPROPERTY(SaveGame)
+	int32 BacklogLinesAtWait = 0;
+
 	UPROPERTY(SaveGame)
 	FADVVariables Variables;
 

@@ -68,6 +68,7 @@ bool UADVSubsystem::SaveGameToSlot(int32 SlotIndex)
 	}
 
 	Save->Backlog   = BacklogEntries;
+	Save->BacklogLinesAtWait = bSectionActive ? FMath::Min(BacklogLinesAtWait, BacklogEntries.Num()) : 0;
 	Save->Variables = Variables;
 	Save->Thumbnail = PendingThumbnail;
 	if (BacklogEntries.Num() > 0)
@@ -131,7 +132,7 @@ bool UADVSubsystem::LoadGameFromSlot(int32 SlotIndex)
 	// Game state first: the new level's BeginPlay can already read it
 	Variables      = Save->Variables;
 	BacklogEntries = Save->Backlog;
-	BacklogSlotsAtWait.Reset();
+	ResetBacklogWaitState();
 
 	bFastForwardToggled = false;
 	bResumeAfterBacklog = false;
@@ -174,6 +175,9 @@ void UADVSubsystem::TickPendingLoad()
 
 void UADVSubsystem::RestoreFromSave(UWorld* World, UADVSaveGame* Save)
 {
+	// Lines started while restoring (first frame, the jump) are already in the restored backlog
+	TGuardValue<bool> RestoringGuard(bRestoringGame, true);
+
 	// Saved outside an ADV sequence: the level alone
 	ULevelSequence* Sequence = Cast<ULevelSequence>(Save->SequencePath.TryLoad());
 	if (!Sequence) { return; }
@@ -223,6 +227,14 @@ void UADVSubsystem::RestoreFromSave(UWorld* World, UADVSaveGame* Save)
 
 				// The voices before it were not heard in this session
 				LastWaitEndSeconds = Wait.Mode == EClickWaitMode::Stop ? Wait.End : Wait.Start;
+
+				// The lines of this wait are the last ones of the restored backlog (a Loop showing them again adds nothing)
+				const int32 NumAtWait = FMath::Clamp(Save->BacklogLinesAtWait, 0, BacklogEntries.Num());
+				for (int32 Index = BacklogEntries.Num() - NumAtWait; Index < BacklogEntries.Num(); ++Index)
+				{
+					RestoredWaitLines.Add(BacklogEntries[Index]);
+				}
+				BacklogLinesAtWait = NumAtWait;
 				return;
 			}
 		}

@@ -148,7 +148,7 @@ void UADVSubsystem::ClearActivePlayer()
 	ActiveSectionKey  = 0;
 	LastWaitEndSeconds = TNumericLimits<double>::Lowest();
 	ResetAutoTimer();
-	BacklogSlotsAtWait.Reset();
+	ResetBacklogWaitState();
 	bResumeAfterBacklog = false;
 
 	// Back to the normal play rate and sound (the old player)
@@ -365,9 +365,9 @@ void UADVSubsystem::JumpToWaitPosition()
 	UMovieSceneSequencePlayer* Player = ActivePlayer.Get();
 	if (!Player) { return; }
 
-	// Just inside the section end (where an exclusive PlayTo would stop), then wait there
+	// Where PlayToSectionEnd stops, then wait there
 	FMovieSceneSequencePlaybackParams Params;
-	Params.Frame        = ActiveSectionEnd - FFrameTime(FFrameNumber(0), 0.5f);
+	Params.Frame        = GetWaitPosition();
 	Params.PositionType = EMovieScenePositionType::Frame;
 	Params.UpdateMethod = EUpdatePositionMethod::Jump;
 	Player->SetPlaybackPosition(Params);
@@ -413,7 +413,7 @@ void UADVSubsystem::EnterWait(const FADVWaitPoint& Wait, FFrameRate DisplayRate)
 	bSectionActive     = true;
 	bAdvanceRequested  = false;
 	ResetAutoTimer();
-	BacklogSlotsAtWait.Reset();
+	ResetBacklogWaitState();
 
 	if (ActiveMode == EClickWaitMode::Stop)
 	{
@@ -431,7 +431,7 @@ void UADVSubsystem::AdvancePastWait()
 	bSectionActive     = false;
 	bPendingPlayTo     = false;
 	ResetAutoTimer();
-	BacklogSlotsAtWait.Reset();
+	ResetBacklogWaitState();
 	JumpPastSection();
 }
 
@@ -744,8 +744,13 @@ void UADVSubsystem::HandleSubtitleSlotStarted(int32 SlotID, const FText& Subtitl
 		FindLineInfo(Player, static_cast<uint32>(SlotID), LineKey, Voice);
 	}
 
+	// Loading a game: the frame the new level starts on (auto play) is not shown, and the lines at the
+	// restored position are already in the restored backlog
+	const bool bLoading   = PendingLoad != nullptr;
+	const bool bRestoring = bLoading || bRestoringGame;
+
 	// Read history: a line shown for the first time stops fast-forward (unless unread lines are skipped too)
-	if (!LineKey.IsEmpty() && MarkLineRead(LineKey) && !GetSkipUnread())
+	if (!LineKey.IsEmpty() && !bLoading && MarkLineRead(LineKey) && !GetSkipUnread())
 	{
 		// Applied in Tick, before the next frame is evaluated
 		bFastForwardToggled = false;
@@ -767,11 +772,32 @@ void UADVSubsystem::HandleSubtitleSlotStarted(int32 SlotID, const FText& Subtitl
 		return;
 	}
 
+	if (bRestoring) { return; }
+
+	// A line of the restored wait shown again (e.g. later in a Loop): already in the backlog
+	const int32 RestoredIndex = RestoredWaitLines.IndexOfByPredicate([&](const FADVBacklogEntry& Restored)
+	{
+		return Restored.Text.EqualTo(SubtitleText) && Restored.SpeakerName.EqualTo(SpeakerName);
+	});
+	if (RestoredIndex != INDEX_NONE)
+	{
+		RestoredWaitLines.RemoveAt(RestoredIndex);
+		return;
+	}
+
 	FADVBacklogEntry Entry;
 	Entry.SpeakerName = SpeakerName;
 	Entry.Text        = SubtitleText;
 	Entry.Voice       = Voice;
 	AddBacklogEntryInternal(Entry);
+	++BacklogLinesAtWait;
+}
+
+void UADVSubsystem::ResetBacklogWaitState()
+{
+	BacklogSlotsAtWait.Reset();
+	BacklogLinesAtWait = 0;
+	RestoredWaitLines.Reset();
 }
 
 void UADVSubsystem::FindLineInfo(UMovieSceneSequencePlayer* Player, uint32 SlotID, FString& OutLineKey, USoundBase*& OutVoice) const
@@ -858,7 +884,7 @@ void UADVSubsystem::ClearBacklog()
 {
 	StopBacklogVoice();
 	BacklogEntries.Reset();
-	BacklogSlotsAtWait.Reset();
+	ResetBacklogWaitState();
 }
 
 void UADVSubsystem::OpenBacklog()
@@ -1552,10 +1578,11 @@ void UADVSubsystem::PlayToSectionEnd()
 	UMovieSceneSequencePlayer* Player = ActivePlayer.Get();
 	if (!Player) { return; }
 
-	// The player pauses exactly at the section end, before any frame after it is evaluated
-	// (checking in Tick would let the next line / audio start for a frame first)
+	// The player pauses by itself on the last frame of the section (checking in Tick would let the next
+	// line / audio start for a frame first). Not on the section end: even an exclusive PlayTo lands on
+	// that frame and Pause() evaluates it, so a line starting there would begin while waiting.
 	FMovieSceneSequencePlaybackParams Params;
-	Params.Frame        = ActiveSectionEnd;
+	Params.Frame        = GetWaitPosition();
 	Params.PositionType = EMovieScenePositionType::Frame;
 	Params.UpdateMethod = EUpdatePositionMethod::Play;
 
@@ -1565,13 +1592,19 @@ void UADVSubsystem::PlayToSectionEnd()
 	Player->PlayTo(Params, PlayToParams);
 }
 
+FFrameTime UADVSubsystem::GetWaitPosition() const
+{
+	// The last frame of the section
+	return ActiveSectionEnd - FFrameTime(FFrameNumber(1));
+}
+
 bool UADVSubsystem::IsAtSectionEnd(UMovieSceneSequencePlayer* Player) const
 {
 	const FQualifiedFrameTime Current = Player->GetCurrentTime();
 	const FFrameTime CurrentInRate = FFrameRate::TransformTime(Current.Time, Current.Rate, ActiveDisplayRate);
 
-	// Within one frame of the end (an exclusive PlayTo stops just before it)
-	return CurrentInRate.AsDecimal() >= ActiveSectionEnd.AsDecimal() - 1.0;
+	// At the wait position (the last frame) or later; a small margin for rounding between rates
+	return CurrentInRate.AsDecimal() >= GetWaitPosition().AsDecimal() - 0.01;
 }
 
 void UADVSubsystem::JumpPastSection()
