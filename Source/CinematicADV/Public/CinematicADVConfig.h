@@ -9,6 +9,16 @@
 class UInputAction;
 class UInputMappingContext;
 
+/** What a click does while the sequence is playing outside a Click Wait section. */
+UENUM(BlueprintType)
+enum class EADVClickOutsideWait : uint8
+{
+	/** Jump to the next Click Wait (Stop: its end, waiting; Loop: its start). */
+	JumpToNextWait UMETA(DisplayName = "Jump to Next Wait"),
+	/** Ignore the click. */
+	DoNothing      UMETA(DisplayName = "Do Nothing"),
+};
+
 /**
  * CinematicADV configuration DataAsset.
  *
@@ -47,6 +57,14 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Input")
 	TObjectPtr<UInputAction> SkipAction;
+
+	/**
+	 * Click while the sequence plays outside a Click Wait section.
+	 * (Inside a Stop section, the first click shows the whole text if a typewriter is still revealing it,
+	 * the next click advances.)
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Advance")
+	EADVClickOutsideWait ClickOutsideWait = EADVClickOutsideWait::JumpToNextWait;
 
 	/** Seconds the player must hold SkipAction before the skip triggers. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Skip", meta=(ClampMin="0.1", UIMin="0.1"))

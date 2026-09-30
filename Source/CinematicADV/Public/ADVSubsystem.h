@@ -9,14 +9,25 @@
 #include "Misc/FrameRate.h"
 #include "TimerManager.h"
 #include "ClickWaitSection.h"
+#include "CinematicADVConfig.h"
 #include "ADVSubsystem.generated.h"
 
 class ULevelSequencePlayer;
+class UMovieSceneSequence;
 class UMovieSceneSequencePlayer;
 class APlayerController;
 class ULocalPlayer;
 class UCinematicADVConfig;
 class SSkipGaugeWidget;
+
+/** One Click Wait section in the player's root time (seconds). */
+struct FADVWaitPoint
+{
+	uint32         Key   = 0;
+	EClickWaitMode Mode  = EClickWaitMode::Stop;
+	double         Start = 0.0;
+	double         End   = 0.0;
+};
 
 /**
  * Central subsystem for CinematicADV.
@@ -49,8 +60,10 @@ public:
 	// --- Input ---
 
 	/**
-	 * Advance past the current wait section.
-	 * Normally called automatically via Enhanced Input binding.
+	 * Advance (normally called via the Enhanced Input binding):
+	 * - Stop section while a typewriter is still revealing text: jump to the wait position (whole text shown)
+	 * - Stop / Loop section otherwise: continue after the section
+	 * - Outside a wait section: jump to the next wait (Config: ClickOutsideWait)
 	 */
 	UFUNCTION(BlueprintCallable, Category="CinematicADV")
 	void Advance();
@@ -96,6 +109,18 @@ private:
 	void RemoveInputContext();
 	APlayerController* GetLocalController() const;
 
+	/** Click Wait sections of a sequence: its own tracks and those of its sub-sequences / shots (one level). */
+	static void CollectWaitPoints(UMovieSceneSequence* Sequence, TArray<FADVWaitPoint>& OutWaits);
+
+	/** Find a playing sequence that contains Click Wait sections, so input works from its first frame. */
+	void PollForAdvPlayer(float DeltaTime);
+
+	// Advance handling
+	void HandleAdvance();
+	bool IsTextRevealing() const;
+	void JumpToWaitPosition();
+	void JumpToNextWait();
+
 	// Playback control
 	void PlayToSectionEnd();
 	bool IsAtSectionEnd(UMovieSceneSequencePlayer* Player) const;
@@ -134,6 +159,10 @@ private:
 	TWeakObjectPtr<ULocalPlayer> ContextLocalPlayer;
 	bool           bContextAdded     = false;
 
+	/** Sequences already checked for Click Wait sections. */
+	TMap<TWeakObjectPtr<UMovieSceneSequence>, bool> AdvSequenceCache;
+	float          PollElapsed       = 0.0f;
+
 	bool           bSectionActive    = false;
 	bool           bAdvanceRequested = false;
 	bool           bPendingPlayTo    = false;
@@ -148,6 +177,7 @@ private:
 	FFrameRate     ActiveDisplayRate;
 
 	// Config cache (populated in ResolveConfig)
+	EADVClickOutsideWait ConfigClickOutsideWait = EADVClickOutsideWait::JumpToNextWait;
 	float        ConfigFadeDuration     = 0.5f;
 	bool         bConfigFadeInAfterSkip = true;
 	float        ConfigFadeInDuration   = 0.5f;

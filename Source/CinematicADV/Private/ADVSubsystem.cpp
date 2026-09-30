@@ -18,6 +18,13 @@
 #include "GameFramework/PlayerController.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Widgets/SOverlay.h"
+#include "EngineUtils.h"
+#include "LevelSequenceActor.h"
+#include "MovieScene.h"
+#include "MovieSceneSequence.h"
+#include "Sections/MovieSceneSubSection.h"
+#include "ClickWaitTrack.h"
+#include "SubtitleSubsystem.h"
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -145,6 +152,7 @@ UCinematicADVConfig* UADVSubsystem::ResolveConfig()
 
 	if (Config)
 	{
+		ConfigClickOutsideWait = Config->ClickOutsideWait;
 		ConfigFadeDuration     = Config->FadeOutDuration;
 		bConfigFadeInAfterSkip = Config->bFadeInAfterSkip;
 		ConfigFadeInDuration   = Config->FadeInDuration;
@@ -260,8 +268,204 @@ void UADVSubsystem::OnSectionEvaluated(UMovieSceneSequencePlayer* Player, uint32
 
 void UADVSubsystem::Advance()
 {
-	if (!bSectionActive) { return; }
-	bAdvanceRequested = true;
+	// Handled in Tick, after this frame's evaluation
+	if (ActivePlayer.IsValid())
+	{
+		bAdvanceRequested = true;
+	}
+}
+
+bool UADVSubsystem::IsTextRevealing() const
+{
+	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
+	const USubtitleSubsystem* Subtitles = World ? World->GetSubsystem<USubtitleSubsystem>() : nullptr;
+	return Subtitles && Subtitles->IsTypewriterRevealing();
+}
+
+void UADVSubsystem::HandleAdvance()
+{
+	UMovieSceneSequencePlayer* Player = ActivePlayer.Get();
+	if (!Player) { return; }
+
+	if (bSectionActive)
+	{
+		// First click in a Stop section while the text is still being typed: show it all (wait position)
+		if (ActiveMode == EClickWaitMode::Stop && !IsAtSectionEnd(Player) && IsTextRevealing())
+		{
+			JumpToWaitPosition();
+			return;
+		}
+
+		// Otherwise continue after the section
+		bSectionActive = false;
+		bPendingPlayTo = false;
+		JumpPastSection();
+		return;
+	}
+
+	// Outside a wait section
+	ResolveConfig();
+	if (ConfigClickOutsideWait == EADVClickOutsideWait::JumpToNextWait)
+	{
+		JumpToNextWait();
+	}
+}
+
+void UADVSubsystem::JumpToWaitPosition()
+{
+	UMovieSceneSequencePlayer* Player = ActivePlayer.Get();
+	if (!Player) { return; }
+
+	// Just inside the section end (where an exclusive PlayTo would stop), then wait there
+	FMovieSceneSequencePlaybackParams Params;
+	Params.Frame        = ActiveSectionEnd - FFrameTime(FFrameNumber(0), 0.5f);
+	Params.PositionType = EMovieScenePositionType::Frame;
+	Params.UpdateMethod = EUpdatePositionMethod::Jump;
+	Player->SetPlaybackPosition(Params);
+	Player->Pause();
+	bPendingPlayTo = false;
+}
+
+void UADVSubsystem::JumpToNextWait()
+{
+	UMovieSceneSequencePlayer* Player = ActivePlayer.Get();
+	if (!Player) { return; }
+
+	TArray<FADVWaitPoint> Waits;
+	CollectWaitPoints(Player->GetSequence(), Waits);
+
+	const FQualifiedFrameTime Now = Player->GetCurrentTime();
+	const double NowSeconds = Now.AsSeconds();
+
+	const FADVWaitPoint* Next = nullptr;
+	for (const FADVWaitPoint& Wait : Waits)
+	{
+		if (Wait.End > NowSeconds + KINDA_SMALL_NUMBER && (!Next || Wait.Start < Next->Start))
+		{
+			Next = &Wait;
+		}
+	}
+	if (!Next) { return; }
+
+	// Wait on it as if it had been reached by playing
+	ActiveDisplayRate  = Now.Rate;
+	ActiveSectionStart = ActiveDisplayRate.AsFrameTime(Next->Start);
+	ActiveSectionEnd   = ActiveDisplayRate.AsFrameTime(Next->End);
+	ActiveSectionKey   = Next->Key;
+	ActiveMode         = Next->Mode;
+	bSectionActive     = true;
+
+	if (ActiveMode == EClickWaitMode::Stop)
+	{
+		JumpToWaitPosition();
+	}
+	else
+	{
+		LoopToStart();
+	}
+}
+
+void UADVSubsystem::CollectWaitPoints(UMovieSceneSequence* Sequence, TArray<FADVWaitPoint>& OutWaits)
+{
+	const UMovieScene* MovieScene = Sequence ? Sequence->GetMovieScene() : nullptr;
+	if (!MovieScene) { return; }
+
+	const FFrameRate TickResolution = MovieScene->GetTickResolution();
+
+	// Adds the wait sections of a Click Wait track. Map converts seconds of that sequence to root seconds.
+	auto AddTrackWaits = [&OutWaits](const UMovieSceneTrack* Track, FFrameRate TrackTickResolution,
+		TFunctionRef<double(double)> Map, double ClipStart, double ClipEnd)
+	{
+		for (const UMovieSceneSection* Section : Track->GetAllSections())
+		{
+			const UClickWaitSection* WaitSection = Cast<UClickWaitSection>(Section);
+			if (!WaitSection || !WaitSection->IsActive() || !WaitSection->HasStartFrame() || !WaitSection->HasEndFrame()) { continue; }
+
+			FADVWaitPoint Wait;
+			Wait.Key   = WaitSection->GetUniqueID();
+			Wait.Mode  = WaitSection->Mode;
+			Wait.Start = FMath::Max(Map(TrackTickResolution.AsSeconds(FFrameTime(WaitSection->GetInclusiveStartFrame()))), ClipStart);
+			Wait.End   = FMath::Min(Map(TrackTickResolution.AsSeconds(FFrameTime(WaitSection->GetExclusiveEndFrame()))), ClipEnd);
+			if (Wait.End > Wait.Start)
+			{
+				OutWaits.Add(Wait);
+			}
+		}
+	};
+
+	for (const UMovieSceneTrack* Track : MovieScene->GetTracks())
+	{
+		if (!Track) { continue; }
+
+		// Waits on the sequence itself
+		if (Track->IsA<UClickWaitTrack>())
+		{
+			AddTrackWaits(Track, TickResolution, [](double Seconds) { return Seconds; },
+				TNumericLimits<double>::Lowest(), TNumericLimits<double>::Max());
+			continue;
+		}
+
+		// Waits inside sub-sequences / shots (one level; play rate 1 assumed)
+		for (const UMovieSceneSection* Section : Track->GetAllSections())
+		{
+			const UMovieSceneSubSection* SubSection = Cast<UMovieSceneSubSection>(Section);
+			if (!SubSection || !SubSection->IsActive() || !SubSection->HasStartFrame() || !SubSection->HasEndFrame()) { continue; }
+
+			UMovieSceneSequence* SubSequence = SubSection->GetSequence();
+			const UMovieScene* SubMovieScene = SubSequence ? SubSequence->GetMovieScene() : nullptr;
+			if (!SubMovieScene || !SubMovieScene->GetPlaybackRange().HasLowerBound()) { continue; }
+
+			const FFrameRate SubTickResolution = SubMovieScene->GetTickResolution();
+			const double OuterStart = TickResolution.AsSeconds(FFrameTime(SubSection->GetInclusiveStartFrame()));
+			const double OuterEnd   = TickResolution.AsSeconds(FFrameTime(SubSection->GetExclusiveEndFrame()));
+			const double InnerStart = SubTickResolution.AsSeconds(FFrameTime(
+				SubMovieScene->GetPlaybackRange().GetLowerBoundValue() + SubSection->Parameters.StartFrameOffset));
+
+			for (const UMovieSceneTrack* SubTrack : SubMovieScene->GetTracks())
+			{
+				if (SubTrack && SubTrack->IsA<UClickWaitTrack>())
+				{
+					AddTrackWaits(SubTrack, SubTickResolution,
+						[OuterStart, InnerStart](double Seconds) { return OuterStart + (Seconds - InnerStart); },
+						OuterStart, OuterEnd);
+				}
+			}
+		}
+	}
+}
+
+void UADVSubsystem::PollForAdvPlayer(float DeltaTime)
+{
+	PollElapsed += DeltaTime;
+	if (PollElapsed < 0.25f || ActivePlayer.IsValid()) { return; }
+	PollElapsed = 0.0f;
+
+	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
+	if (!World) { return; }
+
+	for (TActorIterator<ALevelSequenceActor> It(World); It; ++It)
+	{
+		ULevelSequencePlayer* Player = It->GetSequencePlayer();
+		if (!Player || !Player->IsPlaying()) { continue; }
+
+		UMovieSceneSequence* Sequence = Player->GetSequence();
+		if (!Sequence) { continue; }
+
+		bool* bCached = AdvSequenceCache.Find(Sequence);
+		if (!bCached)
+		{
+			TArray<FADVWaitPoint> Waits;
+			CollectWaitPoints(Sequence, Waits);
+			bCached = &AdvSequenceCache.Add(Sequence, Waits.Num() > 0);
+		}
+
+		// A sequence with Click Wait sections: enable input from its first frame
+		if (*bCached)
+		{
+			SetActivePlayer(Player);
+			return;
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -414,22 +618,23 @@ void UADVSubsystem::Tick(float DeltaTime)
 		// Gauge updates via TAttribute lambda — no explicit update needed
 	}
 
+	// Pick up ADV sequences before their first wait section
+	PollForAdvPlayer(DeltaTime);
+
+	// Process advance (works even when paused)
+	if (bAdvanceRequested)
+	{
+		bAdvanceRequested = false;
+		HandleAdvance();
+		return;
+	}
+
 	if (!bSectionActive) { return; }
 
 	UMovieSceneSequencePlayer* Player = ActivePlayer.Get();
 	if (!Player)
 	{
 		bSectionActive = false;
-		return;
-	}
-
-	// Process advance (works even when paused)
-	if (bAdvanceRequested)
-	{
-		bAdvanceRequested = false;
-		bSectionActive    = false;
-		bPendingPlayTo    = false;
-		JumpPastSection();
 		return;
 	}
 
@@ -454,7 +659,8 @@ void UADVSubsystem::Tick(float DeltaTime)
 
 bool UADVSubsystem::IsTickable() const
 {
-	return bSkipHeld || (bSectionActive && ActivePlayer.IsValid());
+	// Ticks while the game runs (the class default object never ticks)
+	return !HasAnyFlags(RF_ClassDefaultObject) && GetGameInstance() && GetGameInstance()->GetWorld();
 }
 
 TStatId UADVSubsystem::GetStatId() const
