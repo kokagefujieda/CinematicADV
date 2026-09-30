@@ -309,7 +309,7 @@
 - `SetStringVariable` / `GetStringVariable`、`SetNumberVariable` / `GetNumberVariable`、`SetFlag` / `GetFlag`、`ClearVariables`
 - イベント: `OnGameSaved` / `OnGameLoaded`（再開した後）
 
-## ボイス用サウンドクラス・ボイス音量（実装済み・未ビルド。SC_Voice はユーザー待ち）
+## ボイス用サウンドクラス・ボイス音量（実装済み・未ビルド）
 
 **決定（2026-09-30）:**
 - `SC_Voice`（サウンドクラス）は、**ユーザーがローカルの UE 5.7 で作って push する**（ここでは .uasset を作れないため。Git でやりとりする）。
@@ -356,3 +356,10 @@
 - **uplugin の `EngineVersion`（未決定・ユーザー確認待ち）:** 今は `"5.7.0"`。依存先の SequencerSubtitles は `"5.8.0"`。
   - この項目があると、ほかの版で警告や互換性チェックに引っかかる可能性がある（記憶ベース、要確認）。
   - 案: GitHub 配布では項目を消す。Fab に出すときは、版ごとのパッケージで設定する。
+
+### SC_Voice の受け取り（2026-09-30）
+- ユーザーが UE 5.7 で作り、`main` に直接 push した（`0fa8b57`）。作業ブランチには merge で取り込んだ。
+- 中身を確認した: 5.7 で保存、クラスは SoundClass、名前は `SC_Voice`、親クラスなし（参照は `/Script` だけ）。
+- 気になる点: ファイル内に記録されたパッケージ名が `/Game/Audio/SC_Voice`（作った場所）のまま。
+  - ファイルの場所から名前が決まるので、たいていはそのまま読める（記憶ベース、要確認）。
+  - プラグインが 5.7 でビルドできたら、エディタで `SC_Voice` を開いて保存し直してもらうと確実（5.7 で）。
