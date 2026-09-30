@@ -17,7 +17,8 @@ class UInputMappingContext;
  *      (right-click → Miscellaneous → Data Asset → CinematicADVConfig).
  *   2. Set InputMappingContext to the IMC that maps your advance key (e.g. Left Click, Enter).
  *   3. Set AdvanceAction to the Input Action bound in that IMC.
- *   Done. No Blueprint or Project Settings required.
+ *   4. Set it in Project Settings → Plugins → CinematicADV → Config Asset.
+ *      (Without this the asset is found automatically in the editor, but may not be packaged.)
  */
 UCLASS(BlueprintType)
 class CINEMATICADV_API UCinematicADVConfig : public UDataAsset
@@ -27,7 +28,7 @@ class CINEMATICADV_API UCinematicADVConfig : public UDataAsset
 public:
 	/**
 	 * Input Mapping Context that contains the AdvanceAction mapping.
-	 * The plugin will add this IMC automatically at priority 90.
+	 * The plugin adds it (priority 90) only while a sequence with Click Wait sections is playing.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Input")
 	TObjectPtr<UInputMappingContext> InputMappingContext;
@@ -54,6 +55,14 @@ public:
 	/** Duration of the fade-to-black after hold completes (seconds). 0 = instant cut. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Skip", meta=(ClampMin="0.0", UIMin="0.0"))
 	float FadeOutDuration = 0.5f;
+
+	/** Fade back in from black after the skipped sequence has stopped. Turn off if your game handles the fade itself. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Skip")
+	bool bFadeInAfterSkip = true;
+
+	/** Duration of the fade back in after a skip (seconds). 0 = instant. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Skip", meta=(EditCondition="bFadeInAfterSkip", ClampMin="0.0", UIMin="0.0"))
+	float FadeInDuration = 0.5f;
 
 	/** Size of the circular gauge widget in pixels. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Skip|Gauge", meta=(ClampMin="32", UIMin="32"))

@@ -6,11 +6,16 @@
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "Tickable.h"
 #include "Misc/FrameTime.h"
+#include "Misc/FrameRate.h"
 #include "TimerManager.h"
 #include "ClickWaitSection.h"
 #include "ADVSubsystem.generated.h"
 
 class ULevelSequencePlayer;
+class UMovieSceneSequencePlayer;
+class APlayerController;
+class ULocalPlayer;
+class UCinematicADVConfig;
 class SSkipGaugeWidget;
 
 /**
@@ -19,8 +24,10 @@ class SSkipGaugeWidget;
  * Zero-Blueprint setup:
  *   1. Create a UCinematicADVConfig DataAsset in Content.
  *   2. Set InputMappingContext, AdvanceAction, and optionally SkipAction.
- *   3. Add a Click Wait Track to your Level Sequence and place sections.
- *   That's it — player registration and input binding happen automatically.
+ *   3. Set it in Project Settings → Plugins → CinematicADV → Config Asset.
+ *   4. Add a Click Wait Track to your Level Sequence and place sections.
+ *   The player that plays a Click Wait section is picked up automatically, and the input
+ *   mapping is active only while that sequence plays.
  *
  * Manual override: Call RegisterSequencePlayer() from Blueprint if needed.
  */
@@ -30,11 +37,12 @@ class CINEMATICADV_API UADVSubsystem : public UGameInstanceSubsystem, public FTi
 	GENERATED_BODY()
 
 public:
+	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
 
 	// --- Manual override (optional) ---
 
-	/** Manually register a sequence player. Called automatically if not used. */
+	/** Manually register a sequence player (enables input for it). Called automatically if not used. */
 	UFUNCTION(BlueprintCallable, Category="CinematicADV")
 	void RegisterSequencePlayer(ULevelSequencePlayer* Player);
 
@@ -62,7 +70,13 @@ public:
 
 	// --- Called internally by FClickWaitEvalTemplate ---
 
-	void OnSectionEntered(EClickWaitMode Mode, FFrameTime Start, FFrameTime End, FFrameRate Rate);
+	/**
+	 * The player is inside a wait section. Times are seconds in the evaluated (sub)sequence's own time;
+	 * they are converted to the player's time so waits inside sub-sequences work.
+	 * (Sub-sequences played at a rate other than 1 are not supported.)
+	 */
+	void OnSectionEvaluated(UMovieSceneSequencePlayer* Player, uint32 SectionKey, EClickWaitMode Mode,
+		double LocalNow, double LocalStart, double LocalEnd);
 
 	// --- FTickableGameObject ---
 
@@ -71,8 +85,20 @@ public:
 	virtual bool IsTickable() const override;
 
 private:
-	void TryAutoRegisterPlayer();
-	void TryBindInput();
+	// Player
+	void SetActivePlayer(UMovieSceneSequencePlayer* Player);
+	void ClearActivePlayer();
+
+	// Config / input
+	UCinematicADVConfig* ResolveConfig();
+	void EnsureInputBound();
+	void AddInputContext();
+	void RemoveInputContext();
+	APlayerController* GetLocalController() const;
+
+	// Playback control
+	void PlayToSectionEnd();
+	bool IsAtSectionEnd(UMovieSceneSequencePlayer* Player) const;
 	void JumpPastSection();
 	void LoopToStart();
 
@@ -80,34 +106,55 @@ private:
 	void OnSkipPressed();
 	void OnSkipReleased();
 
-	/** Performs the actual fade-to-black → Player->Stop() sequence. */
+	/** Performs the actual fade-to-black → Player->Stop() sequence (then fades back in if configured). */
 	void DoSkip();
 
 	void ShowSkipGauge();
 	void HideSkipGauge();
 
+	/** Bound to OnStop and OnFinished of the active player. */
 	UFUNCTION()
 	void OnPlayerStopped();
 
+	/** A world is going away (level travel): forget its player and give the keys back. */
+	void HandleWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources);
+	FDelegateHandle WorldCleanupHandle;
+
 	UPROPERTY()
-	TWeakObjectPtr<ULevelSequencePlayer> ActivePlayer;
+	TWeakObjectPtr<UMovieSceneSequencePlayer> ActivePlayer;
+
+	/** Resolved config (kept referenced while the game instance lives). */
+	UPROPERTY()
+	TObjectPtr<UCinematicADVConfig> Config;
+
+	/** Controller the input actions are bound to (re-bound when it changes, e.g. after level travel). */
+	TWeakObjectPtr<APlayerController> BoundController;
+
+	/** Local player the input mapping context was added to. */
+	TWeakObjectPtr<ULocalPlayer> ContextLocalPlayer;
+	bool           bContextAdded     = false;
 
 	bool           bSectionActive    = false;
 	bool           bAdvanceRequested = false;
-	bool           bInputBound       = false;
+	bool           bPendingPlayTo    = false;
 	bool           bSkipHeld         = false;
 	bool           bFadeInProgress   = false;
 	EClickWaitMode ActiveMode        = EClickWaitMode::Loop;
+	uint32         ActiveSectionKey  = 0;
+
+	/** Section range in the player's display rate. */
 	FFrameTime     ActiveSectionStart;
 	FFrameTime     ActiveSectionEnd;
 	FFrameRate     ActiveDisplayRate;
 
-	// Config cache (populated in TryBindInput)
-	float        ConfigFadeDuration = 0.5f;
-	float        ConfigHoldDuration = 1.0f;
-	float        ConfigGaugeSize    = 80.0f;
-	FLinearColor ConfigGaugeColor   = FLinearColor(1.f, 0.8f, 0.f, 1.f);
-	FLinearColor ConfigGaugeBgColor = FLinearColor(0.f, 0.f, 0.f, 0.55f);
+	// Config cache (populated in ResolveConfig)
+	float        ConfigFadeDuration     = 0.5f;
+	bool         bConfigFadeInAfterSkip = true;
+	float        ConfigFadeInDuration   = 0.5f;
+	float        ConfigHoldDuration     = 1.0f;
+	float        ConfigGaugeSize        = 80.0f;
+	FLinearColor ConfigGaugeColor       = FLinearColor(1.f, 0.8f, 0.f, 1.f);
+	FLinearColor ConfigGaugeBgColor     = FLinearColor(0.f, 0.f, 0.f, 0.55f);
 
 	float        SkipHoldElapsed = 0.0f;
 	FTimerHandle SkipFadeTimerHandle;

@@ -23,7 +23,11 @@ public:
 	virtual FName GetCategoryName() const override { return FName("Plugins"); }
 	virtual FName GetSectionName()  const override { return FName("CinematicADV"); }
 
-	/** DataAsset that defines the Input Mapping Context and Input Actions for CinematicADV. */
+	/**
+	 * DataAsset that defines the Input Mapping Context and Input Actions for CinematicADV.
+	 * Used first; when empty, the asset is searched in the Asset Registry (works in the editor,
+	 * but an asset nothing refers to may not be packaged).
+	 */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Input",
 		meta=(DisplayName="CinematicADV Config Asset"))
 	TSoftObjectPtr<UCinematicADVConfig> ConfigAsset;

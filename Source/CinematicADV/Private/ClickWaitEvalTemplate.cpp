@@ -5,39 +5,41 @@
 #include "ADVSubsystem.h"
 #include "IMovieScenePlayer.h"
 #include "MovieSceneExecutionToken.h"
+#include "MovieSceneSequencePlayer.h"
 #include "MovieScene.h"
 #include "Engine/World.h"
 #include "Engine/GameInstance.h"
 
-/** Execution token: notifies UADVSubsystem on the game thread when a section is being evaluated. */
+/** Execution token: tells UADVSubsystem (game thread) that the player is inside a wait section. */
 struct FClickWaitExecutionToken : IMovieSceneExecutionToken
 {
 	EClickWaitMode Mode;
-	FFrameTime     SectionStart;
-	FFrameTime     SectionEnd;
-	FFrameRate     DisplayRate;
+	uint32         SectionKey;
+	/** Seconds in the evaluated (sub)sequence's own time. */
+	double         LocalNow;
+	double         LocalStart;
+	double         LocalEnd;
 
-	FClickWaitExecutionToken(EClickWaitMode InMode, FFrameTime InStart, FFrameTime InEnd, FFrameRate InRate)
-		: Mode(InMode), SectionStart(InStart), SectionEnd(InEnd), DisplayRate(InRate)
+	FClickWaitExecutionToken(EClickWaitMode InMode, uint32 InSectionKey, double InNow, double InStart, double InEnd)
+		: Mode(InMode), SectionKey(InSectionKey), LocalNow(InNow), LocalStart(InStart), LocalEnd(InEnd)
 	{
 	}
 
 	virtual void Execute(const FMovieSceneContext& Context, const FMovieSceneEvaluationOperand& Operand,
 		FPersistentEvaluationData& PersistentData, IMovieScenePlayer& Player) override
 	{
+		// Only sequence players (game / PIE) can wait; the Sequencer editor preview has none
+		UMovieSceneSequencePlayer* SequencePlayer = Cast<UMovieSceneSequencePlayer>(Player.AsUObject());
+		if (!SequencePlayer) { return; }
+
 		UObject* PlaybackContext = Player.GetPlaybackContext();
-		if (!PlaybackContext) { return; }
-
-		UWorld* World = PlaybackContext->GetWorld();
-		if (!World) { return; }
-
-		UGameInstance* GI = World->GetGameInstance();
-		if (!GI) { return; }
-
-		UADVSubsystem* Subsystem = GI->GetSubsystem<UADVSubsystem>();
+		UWorld* World = PlaybackContext ? PlaybackContext->GetWorld() : nullptr;
+		UGameInstance* GI = World ? World->GetGameInstance() : nullptr;
+		UADVSubsystem* Subsystem = GI ? GI->GetSubsystem<UADVSubsystem>() : nullptr;
 		if (!Subsystem) { return; }
 
-		Subsystem->OnSectionEntered(Mode, SectionStart, SectionEnd, DisplayRate);
+		// The player that evaluates this section is the one to control (not "the first playing one")
+		Subsystem->OnSectionEvaluated(SequencePlayer, SectionKey, Mode, LocalNow, LocalStart, LocalEnd);
 	}
 };
 
@@ -45,19 +47,16 @@ FClickWaitEvalTemplate::FClickWaitEvalTemplate(const UClickWaitSection& InSectio
 {
 	Mode = InSection.Mode;
 
-	// Get tick and display rates from the owning MovieScene
-	const UMovieScene* MovieScene = InSection.GetTypedOuter<UMovieScene>();
-	const FFrameRate TickRate    = MovieScene ? MovieScene->GetTickResolution() : FFrameRate(24000, 1);
-	DisplayRate                  = MovieScene ? MovieScene->GetDisplayRate()    : FFrameRate(30, 1);
+	if (const UMovieScene* MovieScene = InSection.GetTypedOuter<UMovieScene>())
+	{
+		TickResolution = MovieScene->GetTickResolution();
+	}
 
-	// Convert section range from tick resolution to display rate
 	const TRange<FFrameNumber> Range = InSection.GetRange();
+	SectionStart = Range.HasLowerBound() ? Range.GetLowerBoundValue() : FFrameNumber(0);
+	SectionEnd   = Range.HasUpperBound() ? Range.GetUpperBoundValue() : FFrameNumber(0);
 
-	const FFrameNumber StartTick = Range.HasLowerBound() ? Range.GetLowerBoundValue() : FFrameNumber(0);
-	const FFrameNumber EndTick   = Range.HasUpperBound() ? Range.GetUpperBoundValue() : FFrameNumber(0);
-
-	SectionStart = FFrameRate::TransformTime(FFrameTime(StartTick), TickRate, DisplayRate);
-	SectionEnd   = FFrameRate::TransformTime(FFrameTime(EndTick),   TickRate, DisplayRate);
+	SectionKey = InSection.GetUniqueID();
 }
 
 void FClickWaitEvalTemplate::Evaluate(
@@ -66,5 +65,9 @@ void FClickWaitEvalTemplate::Evaluate(
 	const FPersistentEvaluationData& PersistentData,
 	FMovieSceneExecutionTokens& ExecutionTokens) const
 {
-	ExecutionTokens.Add(FClickWaitExecutionToken(Mode, SectionStart, SectionEnd, DisplayRate));
+	const double Now   = TickResolution.AsSeconds(Context.GetTime());
+	const double Start = TickResolution.AsSeconds(FFrameTime(SectionStart));
+	const double End   = TickResolution.AsSeconds(FFrameTime(SectionEnd));
+
+	ExecutionTokens.Add(FClickWaitExecutionToken(Mode, SectionKey, Now, Start, End));
 }

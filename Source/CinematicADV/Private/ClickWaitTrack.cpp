@@ -21,7 +21,7 @@ UMovieSceneSection* UClickWaitTrack::CreateNewSection()
 
 const TArray<UMovieSceneSection*>& UClickWaitTrack::GetAllSections() const
 {
-	return reinterpret_cast<const TArray<UMovieSceneSection*>&>(Sections);
+	return Sections;
 }
 
 bool UClickWaitTrack::HasSection(const UMovieSceneSection& Section) const

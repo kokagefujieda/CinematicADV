@@ -4,13 +4,14 @@
 
 #include "CoreMinimal.h"
 #include "Evaluation/MovieSceneEvalTemplate.h"
-#include "Misc/FrameTime.h"
+#include "Misc/FrameRate.h"
 #include "ClickWaitSection.h"
 #include "ClickWaitEvalTemplate.generated.h"
 
 /**
  * Evaluation template for UClickWaitTrack.
- * Notifies UADVSubsystem to start monitoring this section for loop/stop behavior.
+ * Tells UADVSubsystem which player is inside which wait section, in that sequence's own time
+ * (the subsystem converts it to the player's time, so waits inside sub-sequences work too).
  */
 USTRUCT()
 struct CINEMATICADV_API FClickWaitEvalTemplate : public FMovieSceneEvalTemplate
@@ -23,17 +24,19 @@ struct CINEMATICADV_API FClickWaitEvalTemplate : public FMovieSceneEvalTemplate
 	UPROPERTY()
 	EClickWaitMode Mode = EClickWaitMode::Loop;
 
-	/** Section start in display rate frames. Used to jump back on loop. */
+	/** Section range in the tick resolution of the owning MovieScene. */
 	UPROPERTY()
-	FFrameTime SectionStart;
+	FFrameNumber SectionStart;
 
-	/** Section end in display rate frames. Trigger point for loop/stop. */
 	UPROPERTY()
-	FFrameTime SectionEnd;
+	FFrameNumber SectionEnd;
 
-	/** Display rate of the owning MovieScene. Stored for subsystem use. */
 	UPROPERTY()
-	FFrameRate DisplayRate;
+	FFrameRate TickResolution = FFrameRate(24000, 1);
+
+	/** Identifies the section while it is being waited on. */
+	UPROPERTY()
+	uint32 SectionKey = 0;
 
 private:
 	virtual UScriptStruct& GetScriptStructImpl() const override { return *StaticStruct(); }
