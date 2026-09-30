@@ -8,6 +8,8 @@ It adds click-to-advance and skip to Sequencer cinematics. More ADV features are
 - **Click Wait Track** — pause (Stop) or loop (Loop) a part of the sequence until the player clicks / presses a key
 - **ADV-style clicks** — while a line is still being typed (Sequencer Subtitles typewriter), the first click shows the whole line
   and the next click advances. A click outside a wait jumps to the next wait (can be turned off)
+- **Auto mode** — waits continue by themselves after the line has been read: until the voice ends, or a delay
+  based on the number of characters. Toggle with a key or from Blueprint
 - **Hold to skip** — hold the skip key to fade out and stop the whole sequence (with a circular gauge)
 - **Setup without Blueprint** — one DataAsset for the input mapping and actions
 - Works in sub-sequences (shots) and across level travel
@@ -17,7 +19,7 @@ It adds click-to-advance and skip to Sequencer cinematics. More ADV features are
 
 In this order:
 1. ~~First click shows the whole text, second click advances~~ (done)
-2. Auto mode
+2. ~~Auto mode~~ (done)
 3. Backlog
 4. Fast-forward / skip read text
 5. Save / Load
@@ -41,6 +43,8 @@ Sequencer で制作したシネマティックに、クリック送りとスキ�
 - **Click Wait Track** — シーケンスの一部を、クリック／キー入力まで一時停止（Stop）またはループ（Loop）
 - **ADV 式のクリック** — 台詞がタイプライターで表示途中なら、1 回目のクリックで全文を表示し、2 回目で次へ。
   待機の外でクリックすると、次の待機位置へジャンプ（設定で OFF 可）
+- **オートモード** — 台詞を読み終えたら自動で次へ。ボイスがあればボイスの終わりまで、なければ文字数に応じた時間だけ待つ。
+  キーまたは Blueprint で ON/OFF
 - **長押しスキップ** — スキップキーの長押しで、フェードアウトしてシーケンス全体を停止（円形ゲージ付き）
 - **Blueprint 不要のセットアップ** — 入力の割り当ては DataAsset 1 つで設定
 - サブシーケンス（ショット）の中や、レベル移動後も動作
@@ -50,7 +54,7 @@ Sequencer で制作したシネマティックに、クリック送りとスキ�
 
 次の順で追加予定です。
 1. ~~1 回目のクリックで文章を全部表示、2 回目で次へ~~（対応済み）
-2. オートモード
+2. ~~オートモード~~（対応済み）
 3. バックログ
 4. 早送り・既読スキップ
 5. セーブ / ロード

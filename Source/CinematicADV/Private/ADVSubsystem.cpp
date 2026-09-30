@@ -23,8 +23,11 @@
 #include "MovieScene.h"
 #include "MovieSceneSequence.h"
 #include "Sections/MovieSceneSubSection.h"
-#include "ClickWaitTrack.h"
+#include "Sections/MovieSceneAudioSection.h"
+#include "Sound/SoundBase.h"
+#include "Sound/SoundClass.h"
 #include "SubtitleSubsystem.h"
+#include "SubtitleSection.h"
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -95,6 +98,8 @@ void UADVSubsystem::ClearActivePlayer()
 	bAdvanceRequested = false;
 	bPendingPlayTo    = false;
 	ActiveSectionKey  = 0;
+	LastWaitEndSeconds = TNumericLimits<double>::Lowest();
+	ResetAutoTimer();
 
 	RemoveInputContext();
 }
@@ -160,6 +165,9 @@ UCinematicADVConfig* UADVSubsystem::ResolveConfig()
 		ConfigGaugeSize        = Config->GaugeSize;
 		ConfigGaugeColor       = Config->GaugeColor;
 		ConfigGaugeBgColor     = Config->GaugeBackgroundColor;
+		ConfigAutoBaseDelay       = FMath::Max(Config->AutoBaseDelay, 0.0f);
+		ConfigAutoDelayPerChar    = FMath::Max(Config->AutoDelayPerChar, 0.0f);
+		ConfigAutoDelayAfterVoice = FMath::Max(Config->AutoDelayAfterVoice, 0.0f);
 	}
 	return Config;
 }
@@ -190,6 +198,10 @@ void UADVSubsystem::EnsureInputBound()
 		EIC->BindAction(Cfg->SkipAction, ETriggerEvent::Started,   this, &UADVSubsystem::OnSkipPressed);
 		EIC->BindAction(Cfg->SkipAction, ETriggerEvent::Completed, this, &UADVSubsystem::OnSkipReleased);
 		EIC->BindAction(Cfg->SkipAction, ETriggerEvent::Canceled,  this, &UADVSubsystem::OnSkipReleased);
+	}
+	if (Cfg->AutoAction)
+	{
+		EIC->BindAction(Cfg->AutoAction, ETriggerEvent::Started, this, &UADVSubsystem::ToggleAutoMode);
 	}
 	BoundController = PC;
 }
@@ -257,6 +269,7 @@ void UADVSubsystem::OnSectionEvaluated(UMovieSceneSequencePlayer* Player, uint32
 	ActiveMode         = Mode;
 	bSectionActive     = true;
 	bAdvanceRequested  = false;
+	ResetAutoTimer();
 
 	// Stop exactly at the section end (set after this evaluation, in Tick)
 	bPendingPlayTo = true;
@@ -275,10 +288,15 @@ void UADVSubsystem::Advance()
 	}
 }
 
-bool UADVSubsystem::IsTextRevealing() const
+const USubtitleSubsystem* UADVSubsystem::GetSubtitleSubsystem() const
 {
 	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
-	const USubtitleSubsystem* Subtitles = World ? World->GetSubsystem<USubtitleSubsystem>() : nullptr;
+	return World ? World->GetSubsystem<USubtitleSubsystem>() : nullptr;
+}
+
+bool UADVSubsystem::IsTextRevealing() const
+{
+	const USubtitleSubsystem* Subtitles = GetSubtitleSubsystem();
 	return Subtitles && Subtitles->IsTypewriterRevealing();
 }
 
@@ -297,9 +315,7 @@ void UADVSubsystem::HandleAdvance()
 		}
 
 		// Otherwise continue after the section
-		bSectionActive = false;
-		bPendingPlayTo = false;
-		JumpPastSection();
+		AdvancePastWait();
 		return;
 	}
 
@@ -354,6 +370,10 @@ void UADVSubsystem::JumpToNextWait()
 	ActiveSectionKey   = Next->Key;
 	ActiveMode         = Next->Mode;
 	bSectionActive     = true;
+	ResetAutoTimer();
+
+	// The voices jumped over were not heard (auto mode then waits as for a line without a voice)
+	LastWaitEndSeconds = ActiveMode == EClickWaitMode::Stop ? Next->End : Next->Start;
 
 	if (ActiveMode == EClickWaitMode::Stop)
 	{
@@ -365,73 +385,237 @@ void UADVSubsystem::JumpToNextWait()
 	}
 }
 
-void UADVSubsystem::CollectWaitPoints(UMovieSceneSequence* Sequence, TArray<FADVWaitPoint>& OutWaits)
+void UADVSubsystem::AdvancePastWait()
+{
+	LastWaitEndSeconds = ActiveDisplayRate.AsSeconds(ActiveSectionEnd);
+	bSectionActive     = false;
+	bPendingPlayTo     = false;
+	ResetAutoTimer();
+	JumpPastSection();
+}
+
+void UADVSubsystem::ForEachSectionInRootTime(UMovieSceneSequence* Sequence,
+	TFunctionRef<void(const UMovieSceneSection* Section, double Start, double End)> Visit)
 {
 	const UMovieScene* MovieScene = Sequence ? Sequence->GetMovieScene() : nullptr;
 	if (!MovieScene) { return; }
 
-	const FFrameRate TickResolution = MovieScene->GetTickResolution();
-
-	// Adds the wait sections of a Click Wait track. Map converts seconds of that sequence to root seconds.
-	auto AddTrackWaits = [&OutWaits](const UMovieSceneTrack* Track, FFrameRate TrackTickResolution,
-		TFunctionRef<double(double)> Map, double ClipStart, double ClipEnd)
+	// Master tracks and object-binding tracks (muted tracks are left out)
+	auto ForEachTrack = [](const UMovieScene* Scene, TFunctionRef<void(const UMovieSceneTrack*)> Fn)
 	{
-		for (const UMovieSceneSection* Section : Track->GetAllSections())
+		for (const UMovieSceneTrack* Track : Scene->GetTracks())
 		{
-			const UClickWaitSection* WaitSection = Cast<UClickWaitSection>(Section);
-			if (!WaitSection || !WaitSection->IsActive() || !WaitSection->HasStartFrame() || !WaitSection->HasEndFrame()) { continue; }
-
-			FADVWaitPoint Wait;
-			Wait.Key   = WaitSection->GetUniqueID();
-			Wait.Mode  = WaitSection->Mode;
-			Wait.Start = FMath::Max(Map(TrackTickResolution.AsSeconds(FFrameTime(WaitSection->GetInclusiveStartFrame()))), ClipStart);
-			Wait.End   = FMath::Min(Map(TrackTickResolution.AsSeconds(FFrameTime(WaitSection->GetExclusiveEndFrame()))), ClipEnd);
-			if (Wait.End > Wait.Start)
+			if (Track && !Track->IsEvalDisabled()) { Fn(Track); }
+		}
+		for (const FMovieSceneBinding& Binding : Scene->GetBindings())
+		{
+			for (const UMovieSceneTrack* Track : Binding.GetTracks())
 			{
-				OutWaits.Add(Wait);
+				if (Track && !Track->IsEvalDisabled()) { Fn(Track); }
 			}
 		}
 	};
 
-	for (const UMovieSceneTrack* Track : MovieScene->GetTracks())
+	auto IsUsable = [](const UMovieSceneSection* Section)
 	{
-		if (!Track) { continue; }
+		return Section && Section->IsActive() && Section->HasStartFrame() && Section->HasEndFrame();
+	};
 
-		// Waits on the sequence itself
-		if (Track->IsA<UClickWaitTrack>())
-		{
-			AddTrackWaits(Track, TickResolution, [](double Seconds) { return Seconds; },
-				TNumericLimits<double>::Lowest(), TNumericLimits<double>::Max());
-			continue;
-		}
+	const FFrameRate TickResolution = MovieScene->GetTickResolution();
 
-		// Waits inside sub-sequences / shots (one level; play rate 1 assumed)
+	ForEachTrack(MovieScene, [&](const UMovieSceneTrack* Track)
+	{
 		for (const UMovieSceneSection* Section : Track->GetAllSections())
 		{
-			const UMovieSceneSubSection* SubSection = Cast<UMovieSceneSubSection>(Section);
-			if (!SubSection || !SubSection->IsActive() || !SubSection->HasStartFrame() || !SubSection->HasEndFrame()) { continue; }
+			if (!IsUsable(Section)) { continue; }
 
-			UMovieSceneSequence* SubSequence = SubSection->GetSequence();
+			const double OuterStart = TickResolution.AsSeconds(FFrameTime(Section->GetInclusiveStartFrame()));
+			const double OuterEnd   = TickResolution.AsSeconds(FFrameTime(Section->GetExclusiveEndFrame()));
+			Visit(Section, OuterStart, OuterEnd);
+
+			// Sections inside sub-sequences / shots (one level; play rate 1 assumed)
+			const UMovieSceneSubSection* SubSection = Cast<UMovieSceneSubSection>(Section);
+			UMovieSceneSequence* SubSequence = SubSection ? SubSection->GetSequence() : nullptr;
 			const UMovieScene* SubMovieScene = SubSequence ? SubSequence->GetMovieScene() : nullptr;
 			if (!SubMovieScene || !SubMovieScene->GetPlaybackRange().HasLowerBound()) { continue; }
 
 			const FFrameRate SubTickResolution = SubMovieScene->GetTickResolution();
-			const double OuterStart = TickResolution.AsSeconds(FFrameTime(SubSection->GetInclusiveStartFrame()));
-			const double OuterEnd   = TickResolution.AsSeconds(FFrameTime(SubSection->GetExclusiveEndFrame()));
 			const double InnerStart = SubTickResolution.AsSeconds(FFrameTime(
 				SubMovieScene->GetPlaybackRange().GetLowerBoundValue() + SubSection->Parameters.StartFrameOffset));
 
-			for (const UMovieSceneTrack* SubTrack : SubMovieScene->GetTracks())
+			ForEachTrack(SubMovieScene, [&](const UMovieSceneTrack* SubTrack)
 			{
-				if (SubTrack && SubTrack->IsA<UClickWaitTrack>())
+				for (const UMovieSceneSection* Inner : SubTrack->GetAllSections())
 				{
-					AddTrackWaits(SubTrack, SubTickResolution,
-						[OuterStart, InnerStart](double Seconds) { return OuterStart + (Seconds - InnerStart); },
-						OuterStart, OuterEnd);
+					if (!IsUsable(Inner)) { continue; }
+
+					const double Start = OuterStart + (SubTickResolution.AsSeconds(FFrameTime(Inner->GetInclusiveStartFrame())) - InnerStart);
+					const double End   = OuterStart + (SubTickResolution.AsSeconds(FFrameTime(Inner->GetExclusiveEndFrame())) - InnerStart);
+					const double ClippedStart = FMath::Max(Start, OuterStart);
+					const double ClippedEnd   = FMath::Min(End, OuterEnd);
+					if (ClippedEnd > ClippedStart)
+					{
+						Visit(Inner, ClippedStart, ClippedEnd);
+					}
 				}
+			});
+		}
+	});
+}
+
+void UADVSubsystem::CollectWaitPoints(UMovieSceneSequence* Sequence, TArray<FADVWaitPoint>& OutWaits)
+{
+	ForEachSectionInRootTime(Sequence, [&OutWaits](const UMovieSceneSection* Section, double Start, double End)
+	{
+		const UClickWaitSection* WaitSection = Cast<UClickWaitSection>(Section);
+		if (!WaitSection) { return; }
+
+		FADVWaitPoint Wait;
+		Wait.Key   = WaitSection->GetUniqueID();
+		Wait.Mode  = WaitSection->Mode;
+		Wait.Start = Start;
+		Wait.End   = End;
+		OutWaits.Add(Wait);
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Auto mode
+// ---------------------------------------------------------------------------
+
+void UADVSubsystem::SetAutoMode(bool bEnabled)
+{
+	if (bAutoMode == bEnabled) { return; }
+
+	bAutoMode = bEnabled;
+	ResetAutoTimer();
+	OnAutoModeChanged.Broadcast(bAutoMode);
+}
+
+void UADVSubsystem::ToggleAutoMode()
+{
+	SetAutoMode(!bAutoMode);
+}
+
+void UADVSubsystem::ResetAutoTimer()
+{
+	AutoElapsed = 0.0f;
+	AutoDelay   = -1.0f;
+}
+
+void UADVSubsystem::TickAuto(UMovieSceneSequencePlayer* Player, float DeltaTime)
+{
+	// Stop: the wait is reached once the player has paused at the section end. Loop: as soon as it is entered.
+	const bool bReached = ActiveMode == EClickWaitMode::Loop || (Player->IsPaused() && IsAtSectionEnd(Player));
+	if (!bReached || IsTextRevealing()) { return; }
+
+	if (AutoDelay < 0.0f)
+	{
+		ResolveConfig();
+		AutoDelay = ComputeAutoDelay(Player);
+	}
+
+	AutoElapsed += DeltaTime;
+	if (AutoElapsed >= AutoDelay)
+	{
+		AdvancePastWait();
+	}
+}
+
+float UADVSubsystem::ComputeAutoDelay(UMovieSceneSequencePlayer* Player) const
+{
+	const double WaitStart = ActiveDisplayRate.AsSeconds(ActiveSectionStart);
+	const double WaitEnd   = ActiveDisplayRate.AsSeconds(ActiveSectionEnd);
+
+	// Where the wait is reached: Stop pauses at the section end, Loop waits from its start
+	const double Reached = ActiveMode == EClickWaitMode::Stop ? WaitEnd : WaitStart;
+
+	// Lines on screen while waiting: Stop → at the pause (last frame of the section), Loop → during the section
+	const double LineFrom = ActiveMode == EClickWaitMode::Stop ? WaitEnd - ActiveDisplayRate.AsInterval() : WaitStart;
+
+	bool   bHasVoice = false;
+	double VoiceEnd  = TNumericLimits<double>::Lowest();
+	bool   bHasLine  = false;
+	int32  Chars     = 0;
+
+	auto CountChars = [](const FText& Text)
+	{
+		int32 Count = 0;
+		for (const TCHAR Char : Text.ToString())
+		{
+			if (!FChar::IsWhitespace(Char)) { ++Count; }
+		}
+		return Count;
+	};
+
+	ForEachSectionInRootTime(Player->GetSequence(), [&](const UMovieSceneSection* Section, double Start, double End)
+	{
+		if (const UMovieSceneSeqSubtitleSection* Line = Cast<UMovieSceneSeqSubtitleSection>(Section))
+		{
+			if (Start < WaitEnd && End > LineFrom)
+			{
+				Chars += CountChars(Line->SubtitleText);
+				bHasLine = true;
 			}
+			return;
+		}
+
+		// A voice of this line: started after playback left the previous wait, before this wait ends
+		if (Start >= LastWaitEndSeconds - KINDA_SMALL_NUMBER && Start < WaitEnd && IsVoiceSection(Section))
+		{
+			// The section may be longer than the sound
+			USoundBase* Sound = CastChecked<UMovieSceneAudioSection>(Section)->GetSound();
+			const float Duration = Sound->GetDuration();
+			const double SoundEnd = Duration > 0.0f && !Sound->IsLooping() ? Start + Duration : End;
+
+			bHasVoice = true;
+			VoiceEnd  = FMath::Max(VoiceEnd, FMath::Min(SoundEnd, End));
+		}
+	});
+
+	if (bHasVoice)
+	{
+		// Wait for the voice to finish, then a short pause
+		return static_cast<float>(FMath::Max(VoiceEnd - Reached, 0.0)) + ConfigAutoDelayAfterVoice;
+	}
+
+	// No line in the sequence (e.g. ShowMessage): the text shown right now
+	if (!bHasLine)
+	{
+		const USubtitleSubsystem* Subtitles = GetSubtitleSubsystem();
+		if (Subtitles && Subtitles->bIsSubtitleActive)
+		{
+			Chars = CountChars(Subtitles->CurrentSubtitleText);
 		}
 	}
+
+	// Reading time
+	return ConfigAutoBaseDelay + ConfigAutoDelayPerChar * Chars;
+}
+
+bool UADVSubsystem::IsVoiceSection(const UMovieSceneSection* Section) const
+{
+	const UMovieSceneAudioSection* Audio = Cast<UMovieSceneAudioSection>(Section);
+	USoundBase* Sound = Audio ? Audio->GetSound() : nullptr;
+	if (!Sound || !Config) { return false; }
+
+	// Sound Class (or one of its parents) in the list
+	if (Config->VoiceSoundClasses.Num() > 0)
+	{
+		int32 Depth = 0;
+		for (USoundClass* Class = Sound->GetSoundClass(); Class && Depth < 16; Class = Class->ParentClass, ++Depth)
+		{
+			if (Config->VoiceSoundClasses.Contains(Class)) { return true; }
+		}
+	}
+
+	// Asset path contains a keyword
+	const FString Path = Sound->GetPathName();
+	for (const FString& Keyword : Config->VoiceAssetKeywords)
+	{
+		if (!Keyword.IsEmpty() && Path.Contains(Keyword, ESearchCase::IgnoreCase)) { return true; }
+	}
+	return false;
 }
 
 void UADVSubsystem::PollForAdvPlayer(float DeltaTime)
@@ -654,6 +838,12 @@ void UADVSubsystem::Tick(float DeltaTime)
 			LoopToStart();
 		}
 		// Stop: stay paused — waiting for Advance()
+	}
+
+	// Auto mode: continue by itself after the delay
+	if (bAutoMode)
+	{
+		TickAuto(Player, DeltaTime);
 	}
 }
 

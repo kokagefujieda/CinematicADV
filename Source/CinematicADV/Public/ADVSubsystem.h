@@ -19,6 +19,10 @@ class APlayerController;
 class ULocalPlayer;
 class UCinematicADVConfig;
 class SSkipGaugeWidget;
+class UMovieSceneSection;
+class USubtitleSubsystem;
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnADVAutoModeChanged, bool, bAutoMode);
 
 /** One Click Wait section in the player's root time (seconds). */
 struct FADVWaitPoint
@@ -34,7 +38,7 @@ struct FADVWaitPoint
  *
  * Zero-Blueprint setup:
  *   1. Create a UCinematicADVConfig DataAsset in Content.
- *   2. Set InputMappingContext, AdvanceAction, and optionally SkipAction.
+ *   2. Set InputMappingContext, AdvanceAction, and optionally SkipAction / AutoAction.
  *   3. Set it in Project Settings → Plugins → CinematicADV → Config Asset.
  *   4. Add a Click Wait Track to your Level Sequence and place sections.
  *   The player that plays a Click Wait section is picked up automatically, and the input
@@ -81,6 +85,26 @@ public:
 	UFUNCTION(BlueprintPure, Category="CinematicADV")
 	bool IsWaiting() const { return bSectionActive; }
 
+	// --- Auto mode ---
+
+	/**
+	 * Auto mode: each wait continues by itself once the text is fully shown and a delay has passed
+	 * (voice: until the voice ends + AutoDelayAfterVoice; no voice: AutoBaseDelay + AutoDelayPerChar × characters).
+	 * Clicking still works while auto mode is on. It stays on until turned off (also across sequences).
+	 */
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Auto")
+	void SetAutoMode(bool bEnabled);
+
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Auto")
+	void ToggleAutoMode();
+
+	UFUNCTION(BlueprintPure, Category="CinematicADV|Auto")
+	bool IsAutoMode() const { return bAutoMode; }
+
+	/** Fires when auto mode is turned on or off (to show an "AUTO" indicator, etc.). */
+	UPROPERTY(BlueprintAssignable, Category="CinematicADV|Auto")
+	FOnADVAutoModeChanged OnAutoModeChanged;
+
 	// --- Called internally by FClickWaitEvalTemplate ---
 
 	/**
@@ -109,6 +133,13 @@ private:
 	void RemoveInputContext();
 	APlayerController* GetLocalController() const;
 
+	/**
+	 * Calls Visit for every active section of a sequence (master and object-binding tracks) and of its
+	 * sub-sequences / shots (one level), with its range in the root sequence's time (seconds, clipped to the sub-section).
+	 */
+	static void ForEachSectionInRootTime(UMovieSceneSequence* Sequence,
+		TFunctionRef<void(const UMovieSceneSection* Section, double Start, double End)> Visit);
+
 	/** Click Wait sections of a sequence: its own tracks and those of its sub-sequences / shots (one level). */
 	static void CollectWaitPoints(UMovieSceneSequence* Sequence, TArray<FADVWaitPoint>& OutWaits);
 
@@ -118,8 +149,22 @@ private:
 	// Advance handling
 	void HandleAdvance();
 	bool IsTextRevealing() const;
+	const USubtitleSubsystem* GetSubtitleSubsystem() const;
 	void JumpToWaitPosition();
 	void JumpToNextWait();
+
+	/** Leave the current wait and play on from its end (click or auto). */
+	void AdvancePastWait();
+
+	// Auto mode
+	void TickAuto(UMovieSceneSequencePlayer* Player, float DeltaTime);
+	void ResetAutoTimer();
+
+	/** Seconds to wait before auto-advancing the current wait (counted from when it is reached and the text is shown). */
+	float ComputeAutoDelay(UMovieSceneSequencePlayer* Player) const;
+
+	/** Whether an audio section plays a voice (Config: VoiceSoundClasses / VoiceAssetKeywords). */
+	bool IsVoiceSection(const UMovieSceneSection* Section) const;
 
 	// Playback control
 	void PlayToSectionEnd();
@@ -164,6 +209,7 @@ private:
 	float          PollElapsed       = 0.0f;
 
 	bool           bSectionActive    = false;
+	bool           bAutoMode         = false;
 	bool           bAdvanceRequested = false;
 	bool           bPendingPlayTo    = false;
 	bool           bSkipHeld         = false;
@@ -176,6 +222,13 @@ private:
 	FFrameTime     ActiveSectionEnd;
 	FFrameRate     ActiveDisplayRate;
 
+	/** Auto mode: time counted at the current wait, and its delay (computed once per wait; < 0 = not yet). */
+	float          AutoElapsed = 0.0f;
+	float          AutoDelay   = -1.0f;
+
+	/** Where playback last left a wait (player's time, seconds). Voices starting after it belong to the next wait. */
+	double         LastWaitEndSeconds = TNumericLimits<double>::Lowest();
+
 	// Config cache (populated in ResolveConfig)
 	EADVClickOutsideWait ConfigClickOutsideWait = EADVClickOutsideWait::JumpToNextWait;
 	float        ConfigFadeDuration     = 0.5f;
@@ -183,6 +236,9 @@ private:
 	float        ConfigFadeInDuration   = 0.5f;
 	float        ConfigHoldDuration     = 1.0f;
 	float        ConfigGaugeSize        = 80.0f;
+	float        ConfigAutoBaseDelay       = 1.0f;
+	float        ConfigAutoDelayPerChar    = 0.05f;
+	float        ConfigAutoDelayAfterVoice = 0.5f;
 	FLinearColor ConfigGaugeColor       = FLinearColor(1.f, 0.8f, 0.f, 1.f);
 	FLinearColor ConfigGaugeBgColor     = FLinearColor(0.f, 0.f, 0.f, 0.55f);
 

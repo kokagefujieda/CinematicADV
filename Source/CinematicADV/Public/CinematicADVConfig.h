@@ -8,6 +8,7 @@
 
 class UInputAction;
 class UInputMappingContext;
+class USoundClass;
 
 /** What a click does while the sequence is playing outside a Click Wait section. */
 UENUM(BlueprintType)
@@ -65,6 +66,42 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Advance")
 	EADVClickOutsideWait ClickOutsideWait = EADVClickOutsideWait::JumpToNextWait;
+
+	/**
+	 * Input Action that turns auto mode on / off. Must be mapped to a key inside InputMappingContext.
+	 * Leave empty to control auto mode from Blueprint only (Set Auto Mode / Toggle Auto Mode).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Auto")
+	TObjectPtr<UInputAction> AutoAction;
+
+	/**
+	 * Auto mode without a voice: seconds to wait once the wait is reached and the text is fully shown.
+	 * Total = AutoBaseDelay + AutoDelayPerChar × characters of the line.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Auto", meta=(ClampMin="0.0", UIMin="0.0"))
+	float AutoBaseDelay = 1.0f;
+
+	/** Auto mode without a voice: extra seconds per character of the line (Sequencer Subtitles text). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Auto", meta=(ClampMin="0.0", UIMin="0.0"))
+	float AutoDelayPerChar = 0.05f;
+
+	/** Auto mode with a voice: seconds to wait after the voice has finished. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Auto", meta=(ClampMin="0.0", UIMin="0.0"))
+	float AutoDelayAfterVoice = 0.5f;
+
+	/**
+	 * Audio sections whose sound uses one of these Sound Classes are treated as voices.
+	 * (An audio section counts as a voice if it matches this OR VoiceAssetKeywords.)
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Auto")
+	TArray<TObjectPtr<USoundClass>> VoiceSoundClasses;
+
+	/**
+	 * Audio sections whose sound asset path contains one of these words (case-insensitive) are treated as voices.
+	 * e.g. "Voice" matches /Game/Voice/Ch01/VO_001. Clear the list to use VoiceSoundClasses only.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Auto")
+	TArray<FString> VoiceAssetKeywords = { TEXT("Voice"), TEXT("VO_") };
 
 	/** Seconds the player must hold SkipAction before the skip triggers. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Skip", meta=(ClampMin="0.1", UIMin="0.1"))
