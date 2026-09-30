@@ -9,6 +9,7 @@
 class UInputAction;
 class UInputMappingContext;
 class USoundClass;
+class UFont;
 
 /** What a click does while the sequence is playing outside a Click Wait section. */
 UENUM(BlueprintType)
@@ -102,6 +103,48 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Auto")
 	TArray<FString> VoiceAssetKeywords = { TEXT("Voice"), TEXT("VO_") };
+
+	/**
+	 * Input Action that opens / closes the backlog. Must be mapped to a key inside InputMappingContext
+	 * (e.g. Mouse Wheel Up). Leave empty to open it from Blueprint only.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Backlog")
+	TObjectPtr<UInputAction> BacklogAction;
+
+	/** Lines kept in the backlog (the oldest are removed first). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Backlog", meta=(ClampMin="1", UIMin="1"))
+	int32 MaxBacklogEntries = 200;
+
+	/**
+	 * Show the plugin's own backlog screen. Turn off to draw your own (UMG) from
+	 * Get Backlog Entries and the On Backlog Opened / Closed events.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Backlog")
+	bool bUseBuiltInBacklogUI = true;
+
+	/**
+	 * Show the mouse cursor while the built-in backlog is open (to scroll and to replay voices).
+	 * On close the cursor is restored; if it was hidden, the input mode is set back to Game Only.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Backlog|UI", meta=(EditCondition="bUseBuiltInBacklogUI"))
+	bool bBacklogShowMouseCursor = true;
+
+	/** Font of the built-in backlog. Empty = engine default font. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Backlog|UI", meta=(EditCondition="bUseBuiltInBacklogUI"))
+	TObjectPtr<UFont> BacklogFont;
+
+	/** Text size of the built-in backlog (Slate units; the speaker name is 80% of it). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Backlog|UI", meta=(EditCondition="bUseBuiltInBacklogUI", ClampMin="8", UIMin="8"))
+	int32 BacklogFontSize = 22;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Backlog|UI", meta=(EditCondition="bUseBuiltInBacklogUI"))
+	FLinearColor BacklogBackgroundColor = FLinearColor(0.f, 0.f, 0.f, 0.85f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Backlog|UI", meta=(EditCondition="bUseBuiltInBacklogUI"))
+	FLinearColor BacklogTextColor = FLinearColor::White;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Backlog|UI", meta=(EditCondition="bUseBuiltInBacklogUI"))
+	FLinearColor BacklogSpeakerColor = FLinearColor(1.f, 0.85f, 0.5f, 1.f);
 
 	/** Seconds the player must hold SkipAction before the skip triggers. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Skip", meta=(ClampMin="0.1", UIMin="0.1"))

@@ -4,6 +4,7 @@
 #include "CinematicADVConfig.h"
 #include "CinematicADVSettings.h"
 #include "SSkipGaugeWidget.h"
+#include "SADVBacklogWidget.h"
 #include "LevelSequencePlayer.h"
 #include "MovieSceneSequencePlayer.h"
 #include "EnhancedInputComponent.h"
@@ -28,6 +29,10 @@
 #include "Sound/SoundClass.h"
 #include "SubtitleSubsystem.h"
 #include "SubtitleSection.h"
+#include "Kismet/GameplayStatics.h"
+#include "Components/AudioComponent.h"
+#include "Styling/CoreStyle.h"
+#include "Engine/Font.h"
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -37,23 +42,51 @@ void UADVSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 	WorldCleanupHandle = FWorldDelegates::OnWorldCleanup.AddUObject(this, &UADVSubsystem::HandleWorldCleanup);
+
+	// Listen to the subtitles of a new world before its actors begin play (a sequence may start on the first frame)
+	WorldActorsInitializedHandle = FWorldDelegates::OnWorldInitializedActors.AddWeakLambda(this,
+		[this](const UWorld::FActorsInitializedParams& Params)
+		{
+			if (Params.World && Params.World->GetGameInstance() == GetGameInstance())
+			{
+				BindSubtitleEvents(Params.World);
+			}
+		});
 }
 
 void UADVSubsystem::Deinitialize()
 {
 	FWorldDelegates::OnWorldCleanup.Remove(WorldCleanupHandle);
+	FWorldDelegates::OnWorldInitializedActors.Remove(WorldActorsInitializedHandle);
 	HideSkipGauge();
+	bResumeAfterBacklog = false;
+	CloseBacklog();
 	ClearActivePlayer();
+	BindSubtitleEvents(nullptr);
 	Super::Deinitialize();
 }
 
 void UADVSubsystem::HandleWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources)
 {
-	// The player may be destroyed without OnStop (level travel)
+	// The backlog of the game world closes with it
+	UWorld* GameWorld = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
 	UMovieSceneSequencePlayer* Player = ActivePlayer.Get();
+	if (!GameWorld || GameWorld == World || (Player && Player->GetWorld() == World))
+	{
+		bResumeAfterBacklog = false;
+		CloseBacklog();
+	}
+
+	// The player may be destroyed without OnStop (level travel)
 	if (!Player || Player->GetWorld() == World)
 	{
 		ClearActivePlayer();
+	}
+
+	USubtitleSubsystem* Subtitles = BoundSubtitles.Get();
+	if (!Subtitles || Subtitles->GetWorld() == World)
+	{
+		BindSubtitleEvents(nullptr);
 	}
 }
 
@@ -100,6 +133,8 @@ void UADVSubsystem::ClearActivePlayer()
 	ActiveSectionKey  = 0;
 	LastWaitEndSeconds = TNumericLimits<double>::Lowest();
 	ResetAutoTimer();
+	BacklogSlotsAtWait.Reset();
+	bResumeAfterBacklog = false;
 
 	RemoveInputContext();
 }
@@ -203,6 +238,10 @@ void UADVSubsystem::EnsureInputBound()
 	{
 		EIC->BindAction(Cfg->AutoAction, ETriggerEvent::Started, this, &UADVSubsystem::ToggleAutoMode);
 	}
+	if (Cfg->BacklogAction)
+	{
+		EIC->BindAction(Cfg->BacklogAction, ETriggerEvent::Started, this, &UADVSubsystem::ToggleBacklog);
+	}
 	BoundController = PC;
 }
 
@@ -281,6 +320,13 @@ void UADVSubsystem::OnSectionEvaluated(UMovieSceneSequencePlayer* Player, uint32
 
 void UADVSubsystem::Advance()
 {
+	// A click while the backlog is open closes it
+	if (bBacklogOpen)
+	{
+		CloseBacklog();
+		return;
+	}
+
 	// Handled in Tick, after this frame's evaluation
 	if (ActivePlayer.IsValid())
 	{
@@ -288,7 +334,7 @@ void UADVSubsystem::Advance()
 	}
 }
 
-const USubtitleSubsystem* UADVSubsystem::GetSubtitleSubsystem() const
+USubtitleSubsystem* UADVSubsystem::GetSubtitleSubsystem() const
 {
 	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
 	return World ? World->GetSubsystem<USubtitleSubsystem>() : nullptr;
@@ -371,6 +417,7 @@ void UADVSubsystem::JumpToNextWait()
 	ActiveMode         = Next->Mode;
 	bSectionActive     = true;
 	ResetAutoTimer();
+	BacklogSlotsAtWait.Reset();
 
 	// The voices jumped over were not heard (auto mode then waits as for a line without a voice)
 	LastWaitEndSeconds = ActiveMode == EClickWaitMode::Stop ? Next->End : Next->Start;
@@ -391,6 +438,7 @@ void UADVSubsystem::AdvancePastWait()
 	bSectionActive     = false;
 	bPendingPlayTo     = false;
 	ResetAutoTimer();
+	BacklogSlotsAtWait.Reset();
 	JumpPastSection();
 }
 
@@ -624,6 +672,11 @@ void UADVSubsystem::PollForAdvPlayer(float DeltaTime)
 	if (PollElapsed < 0.25f || ActivePlayer.IsValid()) { return; }
 	PollElapsed = 0.0f;
 
+	TryFindAdvPlayer();
+}
+
+void UADVSubsystem::TryFindAdvPlayer()
+{
 	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
 	if (!World) { return; }
 
@@ -653,12 +706,306 @@ void UADVSubsystem::PollForAdvPlayer(float DeltaTime)
 }
 
 // ---------------------------------------------------------------------------
+// Backlog
+// ---------------------------------------------------------------------------
+
+void UADVSubsystem::BindSubtitleEvents(UWorld* World)
+{
+	USubtitleSubsystem* Subtitles = World ? World->GetSubsystem<USubtitleSubsystem>() : nullptr;
+	if (Subtitles == BoundSubtitles.Get()) { return; }
+
+	if (USubtitleSubsystem* Old = BoundSubtitles.Get())
+	{
+		Old->OnSubtitleSlotStarted.RemoveDynamic(this, &UADVSubsystem::HandleSubtitleSlotStarted);
+	}
+	BoundSubtitles = Subtitles;
+	if (Subtitles)
+	{
+		Subtitles->OnSubtitleSlotStarted.AddUniqueDynamic(this, &UADVSubsystem::HandleSubtitleSlotStarted);
+	}
+}
+
+void UADVSubsystem::HandleSubtitleSlotStarted(int32 SlotID, const FText& SubtitleText, const FText& SpeakerName,
+	const FSubtitleAppearance& Appearance)
+{
+	if (SubtitleText.IsEmptyOrWhitespace()) { return; }
+
+	// Only lines of ADV sequences (the first line may come before the poll has found the player)
+	if (!ActivePlayer.IsValid())
+	{
+		TryFindAdvPlayer();
+	}
+	UMovieSceneSequencePlayer* Player = ActivePlayer.Get();
+	if (!Player) { return; }
+
+	if (SlotID != 0)
+	{
+		// A subtitle section restarted at the same wait (Loop) is the same line
+		bool bAlreadyRecorded = false;
+		BacklogSlotsAtWait.Add(SlotID, &bAlreadyRecorded);
+		if (bAlreadyRecorded) { return; }
+	}
+	else if (BacklogEntries.Num() > 0
+		&& BacklogEntries.Last().Text.EqualTo(SubtitleText)
+		&& BacklogEntries.Last().SpeakerName.EqualTo(SpeakerName))
+	{
+		// ShowMessage shown again
+		return;
+	}
+
+	ResolveConfig();
+
+	FADVBacklogEntry Entry;
+	Entry.SpeakerName = SpeakerName;
+	Entry.Text        = SubtitleText;
+	Entry.Voice       = SlotID != 0 ? FindLineVoice(Player, static_cast<uint32>(SlotID)) : nullptr;
+	AddBacklogEntryInternal(Entry);
+}
+
+USoundBase* UADVSubsystem::FindLineVoice(UMovieSceneSequencePlayer* Player, uint32 SlotID) const
+{
+	struct FTimedSound
+	{
+		double      Start;
+		double      End;
+		USoundBase* Sound;
+	};
+
+	// The line's section (a sub-sequence used twice appears twice) and the voices
+	TArray<FTimedSound> LineRanges;
+	TArray<FTimedSound> Voices;
+	ForEachSectionInRootTime(Player->GetSequence(), [&](const UMovieSceneSection* Section, double Start, double End)
+	{
+		if (Section->GetUniqueID() == SlotID && Section->IsA<UMovieSceneSeqSubtitleSection>())
+		{
+			LineRanges.Add({ Start, End, nullptr });
+		}
+		else if (IsVoiceSection(Section))
+		{
+			Voices.Add({ Start, End, CastChecked<UMovieSceneAudioSection>(Section)->GetSound() });
+		}
+	});
+	if (LineRanges.Num() == 0 || Voices.Num() == 0) { return nullptr; }
+
+	// The instance playing now
+	const double Now = Player->GetCurrentTime().AsSeconds();
+	const FTimedSound* Line = &LineRanges[0];
+	for (const FTimedSound& Range : LineRanges)
+	{
+		if (Range.Start <= Now + KINDA_SMALL_NUMBER && Now < Range.End)
+		{
+			Line = &Range;
+			break;
+		}
+	}
+
+	// The voice starting closest to the line (from just before it to its end)
+	USoundBase* Best = nullptr;
+	double BestDistance = TNumericLimits<double>::Max();
+	for (const FTimedSound& Voice : Voices)
+	{
+		if (Voice.Start < Line->Start - 0.25 || Voice.Start >= Line->End) { continue; }
+
+		const double Distance = FMath::Abs(Voice.Start - Line->Start);
+		if (Distance < BestDistance)
+		{
+			BestDistance = Distance;
+			Best = Voice.Sound;
+		}
+	}
+	return Best;
+}
+
+void UADVSubsystem::AddBacklogEntry(const FText& SpeakerName, const FText& Text, USoundBase* Voice)
+{
+	FADVBacklogEntry Entry;
+	Entry.SpeakerName = SpeakerName;
+	Entry.Text        = Text;
+	Entry.Voice       = Voice;
+	AddBacklogEntryInternal(Entry);
+}
+
+void UADVSubsystem::AddBacklogEntryInternal(const FADVBacklogEntry& Entry)
+{
+	ResolveConfig();
+	const int32 MaxEntries = FMath::Max(Config ? Config->MaxBacklogEntries : 200, 1);
+
+	BacklogEntries.Add(Entry);
+	if (BacklogEntries.Num() > MaxEntries)
+	{
+		BacklogEntries.RemoveAt(0, BacklogEntries.Num() - MaxEntries);
+	}
+	OnBacklogEntryAdded.Broadcast(Entry);
+}
+
+void UADVSubsystem::ClearBacklog()
+{
+	StopBacklogVoice();
+	BacklogEntries.Reset();
+	BacklogSlotsAtWait.Reset();
+}
+
+void UADVSubsystem::OpenBacklog()
+{
+	if (bBacklogOpen) { return; }
+
+	ResolveConfig();
+	bBacklogOpen      = true;
+	bAdvanceRequested = false;
+	OnSkipReleased();
+
+	// The sequence waits while the player reads
+	UMovieSceneSequencePlayer* Player = ActivePlayer.Get();
+	bResumeAfterBacklog = Player && Player->IsPlaying();
+	if (bResumeAfterBacklog)
+	{
+		Player->Pause();
+	}
+
+	if (Config && Config->bUseBuiltInBacklogUI)
+	{
+		ShowBacklogUI();
+	}
+	OnBacklogOpened.Broadcast();
+}
+
+void UADVSubsystem::CloseBacklog()
+{
+	if (!bBacklogOpen) { return; }
+
+	bBacklogOpen = false;
+	StopBacklogVoice();
+	HideBacklogUI();
+
+	if (bResumeAfterBacklog)
+	{
+		bResumeAfterBacklog = false;
+		if (UMovieSceneSequencePlayer* Player = ActivePlayer.Get())
+		{
+			if (!bSectionActive)
+			{
+				Player->Play();
+			}
+			else if (!IsAtSectionEnd(Player))
+			{
+				// Pausing cleared the stop at the section end: set it again
+				PlayToSectionEnd();
+			}
+			// At the section end: Tick waits (Stop) or loops (Loop) as before
+		}
+	}
+	OnBacklogClosed.Broadcast();
+}
+
+void UADVSubsystem::ToggleBacklog()
+{
+	if (bBacklogOpen)
+	{
+		CloseBacklog();
+	}
+	else
+	{
+		OpenBacklog();
+	}
+}
+
+void UADVSubsystem::PlayBacklogVoice(int32 Index)
+{
+	StopBacklogVoice();
+	if (!BacklogEntries.IsValidIndex(Index) || !BacklogEntries[Index].Voice) { return; }
+
+	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
+	if (!World) { return; }
+
+	BacklogVoiceComponent = UGameplayStatics::SpawnSound2D(World, BacklogEntries[Index].Voice);
+}
+
+void UADVSubsystem::StopBacklogVoice()
+{
+	if (UAudioComponent* Component = BacklogVoiceComponent.Get())
+	{
+		Component->Stop();
+	}
+	BacklogVoiceComponent.Reset();
+}
+
+void UADVSubsystem::ShowBacklogUI()
+{
+	UGameViewportClient* ViewportClient = GetGameInstance() ? GetGameInstance()->GetGameViewportClient() : nullptr;
+	if (!ViewportClient || !Config || BacklogWidget.IsValid()) { return; }
+
+	const int32 FontSize = FMath::Max(Config->BacklogFontSize, 1);
+	const FSlateFontInfo Font = Config->BacklogFont
+		? FSlateFontInfo(Config->BacklogFont, FontSize)
+		: FCoreStyle::GetDefaultFontStyle("Regular", FontSize);
+
+	TWeakObjectPtr<UADVSubsystem> WeakThis(this);
+	BacklogWidget = SNew(SADVBacklogWidget)
+		.Entries(BacklogEntries)
+		.Font(Font)
+		.BackgroundColor(Config->BacklogBackgroundColor)
+		.TextColor(Config->BacklogTextColor)
+		.SpeakerColor(Config->BacklogSpeakerColor)
+		.OnPlayVoice_Lambda([WeakThis](int32 Index)
+		{
+			if (UADVSubsystem* Self = WeakThis.Get())
+			{
+				Self->PlayBacklogVoice(Index);
+			}
+		});
+
+	// Below the skip gauge (100)
+	ViewportClient->AddViewportWidgetContent(BacklogWidget.ToSharedRef(), 90);
+
+	// Mouse cursor to scroll and to press the voice buttons
+	APlayerController* PC = GetLocalController();
+	if (Config->bBacklogShowMouseCursor && PC)
+	{
+		bBacklogChangedCursor = true;
+		bSavedShowMouseCursor = PC->bShowMouseCursor;
+
+		PC->SetShowMouseCursor(true);
+		FInputModeGameAndUI InputMode;
+		InputMode.SetHideCursorDuringCapture(false);
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		PC->SetInputMode(InputMode);
+	}
+}
+
+void UADVSubsystem::HideBacklogUI()
+{
+	if (BacklogWidget.IsValid())
+	{
+		if (UGameViewportClient* ViewportClient = GetGameInstance() ? GetGameInstance()->GetGameViewportClient() : nullptr)
+		{
+			ViewportClient->RemoveViewportWidgetContent(BacklogWidget.ToSharedRef());
+		}
+		BacklogWidget.Reset();
+	}
+
+	if (bBacklogChangedCursor)
+	{
+		bBacklogChangedCursor = false;
+		if (APlayerController* PC = GetLocalController())
+		{
+			PC->SetShowMouseCursor(bSavedShowMouseCursor);
+
+			// A game that hid the cursor is taken to use Game Only input
+			if (!bSavedShowMouseCursor)
+			{
+				PC->SetInputMode(FInputModeGameOnly());
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Input — Skip (hold)
 // ---------------------------------------------------------------------------
 
 void UADVSubsystem::OnSkipPressed()
 {
-	if (!ActivePlayer.IsValid() || bFadeInProgress) { return; }
+	if (!ActivePlayer.IsValid() || bFadeInProgress || bBacklogOpen) { return; }
 	bSkipHeld        = true;
 	SkipHoldElapsed  = 0.0f;
 	ShowSkipGauge();
@@ -681,6 +1028,10 @@ void UADVSubsystem::Skip()
 void UADVSubsystem::DoSkip()
 {
 	if (!ActivePlayer.IsValid() || bFadeInProgress) { return; }
+
+	// Skipping from the backlog (Blueprint): close it without resuming
+	bResumeAfterBacklog = false;
+	CloseBacklog();
 
 	APlayerController* PC = GetLocalController();
 	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
@@ -804,6 +1155,12 @@ void UADVSubsystem::Tick(float DeltaTime)
 
 	// Pick up ADV sequences before their first wait section
 	PollForAdvPlayer(DeltaTime);
+
+	// Record lines for the backlog (normally bound when the world starts; this catches the rest)
+	BindSubtitleEvents(GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr);
+
+	// The sequence and auto mode wait while the backlog is open
+	if (bBacklogOpen) { return; }
 
 	// Process advance (works even when paused)
 	if (bAdvanceRequested)

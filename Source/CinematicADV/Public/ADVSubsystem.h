@@ -10,6 +10,7 @@
 #include "TimerManager.h"
 #include "ClickWaitSection.h"
 #include "CinematicADVConfig.h"
+#include "SubtitleSettings.h"
 #include "ADVSubsystem.generated.h"
 
 class ULevelSequencePlayer;
@@ -21,8 +22,29 @@ class UCinematicADVConfig;
 class SSkipGaugeWidget;
 class UMovieSceneSection;
 class USubtitleSubsystem;
+class USoundBase;
+class UAudioComponent;
+
+/** One line in the backlog. */
+USTRUCT(BlueprintType)
+struct CINEMATICADV_API FADVBacklogEntry
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category="CinematicADV|Backlog")
+	FText SpeakerName;
+
+	UPROPERTY(BlueprintReadOnly, Category="CinematicADV|Backlog")
+	FText Text;
+
+	/** Voice of the line (empty if the line has no voice). */
+	UPROPERTY(BlueprintReadOnly, Category="CinematicADV|Backlog")
+	TObjectPtr<USoundBase> Voice;
+};
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnADVAutoModeChanged, bool, bAutoMode);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnADVBacklogEntryAdded, const FADVBacklogEntry&, Entry);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnADVBacklogEvent);
 
 /** One Click Wait section in the player's root time (seconds). */
 struct FADVWaitPoint
@@ -105,6 +127,51 @@ public:
 	UPROPERTY(BlueprintAssignable, Category="CinematicADV|Auto")
 	FOnADVAutoModeChanged OnAutoModeChanged;
 
+	// --- Backlog ---
+
+	/**
+	 * Lines shown so far, oldest first. Lines of Sequencer Subtitles are recorded while a sequence with
+	 * Click Wait sections plays; add other lines with AddBacklogEntry. Kept while the game runs.
+	 */
+	UFUNCTION(BlueprintPure, Category="CinematicADV|Backlog")
+	TArray<FADVBacklogEntry> GetBacklogEntries() const { return BacklogEntries; }
+
+	/** Add a line yourself (e.g. text shown by your own UI). */
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Backlog")
+	void AddBacklogEntry(const FText& SpeakerName, const FText& Text, USoundBase* Voice = nullptr);
+
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Backlog")
+	void ClearBacklog();
+
+	/** Open the backlog: the sequence (and auto mode) pauses until it is closed. */
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Backlog")
+	void OpenBacklog();
+
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Backlog")
+	void CloseBacklog();
+
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Backlog")
+	void ToggleBacklog();
+
+	UFUNCTION(BlueprintPure, Category="CinematicADV|Backlog")
+	bool IsBacklogOpen() const { return bBacklogOpen; }
+
+	/** Play the voice of a backlog line (index into Get Backlog Entries). Stops the voice played before. */
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Backlog")
+	void PlayBacklogVoice(int32 Index);
+
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Backlog")
+	void StopBacklogVoice();
+
+	UPROPERTY(BlueprintAssignable, Category="CinematicADV|Backlog")
+	FOnADVBacklogEntryAdded OnBacklogEntryAdded;
+
+	UPROPERTY(BlueprintAssignable, Category="CinematicADV|Backlog")
+	FOnADVBacklogEvent OnBacklogOpened;
+
+	UPROPERTY(BlueprintAssignable, Category="CinematicADV|Backlog")
+	FOnADVBacklogEvent OnBacklogClosed;
+
 	// --- Called internally by FClickWaitEvalTemplate ---
 
 	/**
@@ -145,11 +212,12 @@ private:
 
 	/** Find a playing sequence that contains Click Wait sections, so input works from its first frame. */
 	void PollForAdvPlayer(float DeltaTime);
+	void TryFindAdvPlayer();
 
 	// Advance handling
 	void HandleAdvance();
 	bool IsTextRevealing() const;
-	const USubtitleSubsystem* GetSubtitleSubsystem() const;
+	USubtitleSubsystem* GetSubtitleSubsystem() const;
 	void JumpToWaitPosition();
 	void JumpToNextWait();
 
@@ -165,6 +233,19 @@ private:
 
 	/** Whether an audio section plays a voice (Config: VoiceSoundClasses / VoiceAssetKeywords). */
 	bool IsVoiceSection(const UMovieSceneSection* Section) const;
+
+	// Backlog
+	void BindSubtitleEvents(UWorld* World);
+
+	UFUNCTION()
+	void HandleSubtitleSlotStarted(int32 SlotID, const FText& SubtitleText, const FText& SpeakerName, const FSubtitleAppearance& Appearance);
+
+	/** Voice of a subtitle section (SlotID = its UniqueID): the voice starting closest to the line. */
+	USoundBase* FindLineVoice(UMovieSceneSequencePlayer* Player, uint32 SlotID) const;
+
+	void AddBacklogEntryInternal(const FADVBacklogEntry& Entry);
+	void ShowBacklogUI();
+	void HideBacklogUI();
 
 	// Playback control
 	void PlayToSectionEnd();
@@ -189,6 +270,7 @@ private:
 	/** A world is going away (level travel): forget its player and give the keys back. */
 	void HandleWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources);
 	FDelegateHandle WorldCleanupHandle;
+	FDelegateHandle WorldActorsInitializedHandle;
 
 	UPROPERTY()
 	TWeakObjectPtr<UMovieSceneSequencePlayer> ActivePlayer;
@@ -241,6 +323,22 @@ private:
 	float        ConfigAutoDelayAfterVoice = 0.5f;
 	FLinearColor ConfigGaugeColor       = FLinearColor(1.f, 0.8f, 0.f, 1.f);
 	FLinearColor ConfigGaugeBgColor     = FLinearColor(0.f, 0.f, 0.f, 0.55f);
+
+	// Backlog
+	UPROPERTY()
+	TArray<FADVBacklogEntry> BacklogEntries;
+
+	/** Subtitle sections already recorded at the current wait (a Loop restarting them adds nothing). */
+	TSet<int32>  BacklogSlotsAtWait;
+
+	TWeakObjectPtr<USubtitleSubsystem> BoundSubtitles;
+	TWeakObjectPtr<UAudioComponent>    BacklogVoiceComponent;
+	TSharedPtr<SWidget>                BacklogWidget;
+
+	bool         bBacklogOpen          = false;
+	bool         bResumeAfterBacklog   = false;
+	bool         bBacklogChangedCursor = false;
+	bool         bSavedShowMouseCursor = false;
 
 	float        SkipHoldElapsed = 0.0f;
 	FTimerHandle SkipFadeTimerHandle;
