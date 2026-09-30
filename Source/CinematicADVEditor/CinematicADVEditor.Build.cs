@@ -31,6 +31,8 @@ public class CinematicADVEditor : ModuleRules
 				"UnrealEd",
 				"WorkspaceMenuStructure",
 				"SequencerSubtitles",
+				"ToolMenus",
+				"ContentBrowser",
 			}
 		);
 	}

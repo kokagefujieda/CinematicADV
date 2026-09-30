@@ -14,6 +14,9 @@ It adds click-to-advance and skip to Sequencer cinematics. More ADV features are
   from the recorded data. The sequence pauses while it is open
 - **Fast-forward / skip read text** — hold a key (or toggle) to play fast and pass waits at once. Stops at lines not read
   yet (players can choose to skip them too). The read history is kept in its own save file
+- **Save / Load** — save the position (at a wait), the backlog and your own variables (text, numbers, flags), with a
+  thumbnail. Loading opens the saved level and resumes the sequence. Blueprint functions for your own save screen
+- **Voice** — voice Sound Class `SC_Voice` included; right-click sounds → **Set as Voice**. Player voice volume setting
 - **Hold to skip** — hold the skip key to fade out and stop the whole sequence (with a circular gauge)
 - **Setup without Blueprint** — one DataAsset for the input mapping and actions
 - Works in sub-sequences (shots) and across level travel
@@ -26,7 +29,7 @@ In this order:
 2. ~~Auto mode~~ (done)
 3. ~~Backlog~~ (done)
 4. ~~Fast-forward / skip read text~~ (done)
-5. Save / Load
+5. ~~Save / Load~~ (done)
 6. Choices (branching)
 
 ## Installation
@@ -53,6 +56,9 @@ Sequencer で制作したシネマティックに、クリック送りとスキ�
   記録を取り出して自作の UMG でも表示できる。開いている間はシーケンスを一時停止
 - **早送り・既読スキップ** — キーを押している間（または切り替え）高速再生し、待機はすぐに通過。未読の台詞で止まる
   （プレイヤーの設定で未読も飛ばせる）。既読は専用のセーブファイルに保存
+- **セーブ / ロード** — 位置（待機）、バックログ、ゲーム側の変数（文字列・数値・フラグ）をサムネイル付きで保存。
+  ロードすると保存したレベルを開いてシーケンスを再開。セーブ画面は Blueprint 関数で自作
+- **ボイス** — ボイス用サウンドクラス `SC_Voice` を同梱。サウンドを右クリック →**Set as Voice** で割り当て。プレイヤー向けのボイス音量設定
 - **長押しスキップ** — スキップキーの長押しで、フェードアウトしてシーケンス全体を停止（円形ゲージ付き）
 - **Blueprint 不要のセットアップ** — 入力の割り当ては DataAsset 1 つで設定
 - サブシーケンス（ショット）の中や、レベル移動後も動作
@@ -65,7 +71,7 @@ Sequencer で制作したシネマティックに、クリック送りとスキ�
 2. ~~オートモード~~（対応済み）
 3. ~~バックログ~~（対応済み）
 4. ~~早送り・既読スキップ~~（対応済み）
-5. セーブ / ロード
+5. ~~セーブ / ロード~~（対応済み）
 6. 選択肢（分岐）
 
 ## インストール

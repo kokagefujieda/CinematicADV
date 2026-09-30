@@ -11,5 +11,8 @@ public:
 	virtual void ShutdownModule() override;
 
 private:
+	/** Content Browser: right-click sounds → Set as Voice. */
+	void RegisterMenus();
+
 	FDelegateHandle TrackEditorBindingHandle;
 };

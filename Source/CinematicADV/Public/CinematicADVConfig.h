@@ -50,6 +50,14 @@ class CINEMATICADV_API UCinematicADVConfig : public UDataAsset
 	GENERATED_BODY()
 
 public:
+	UCinematicADVConfig();
+
+	/**
+	 * The project's config: the asset set in Project Settings → Plugins → CinematicADV, otherwise one found in
+	 * the Asset Registry (/Game/ first). Loads it if needed. nullptr if there is none.
+	 */
+	static UCinematicADVConfig* FindConfig();
+
 	/**
 	 * Input Mapping Context that contains the AdvanceAction mapping.
 	 * The plugin adds it (priority 90) only while a sequence with Click Wait sections is playing.
@@ -105,6 +113,8 @@ public:
 	/**
 	 * Audio sections whose sound uses one of these Sound Classes are treated as voices.
 	 * (An audio section counts as a voice if it matches this OR VoiceAssetKeywords.)
+	 * Also used by the player's voice volume and by fast-forward (Mute Voice Sound Classes).
+	 * Default: the plugin's SC_Voice. Right-click sounds in the Content Browser → "Set as Voice" to assign it.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Auto")
 	TArray<TObjectPtr<USoundClass>> VoiceSoundClasses;
@@ -179,6 +189,14 @@ public:
 	/** Save slot of the system data (read history), shared by all save slots. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Fast Forward")
 	FString SystemSaveSlotName = TEXT("CinematicADV_System");
+
+	/** Save slots are named this + the slot number (e.g. CinematicADV_Slot_0). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Save")
+	FString SaveSlotPrefix = TEXT("CinematicADV_Slot_");
+
+	/** Width of the save thumbnail in pixels (Capture Save Thumbnail). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Save", meta=(ClampMin="32", UIMin="32", ClampMax="1920"))
+	int32 ThumbnailWidth = 320;
 
 	/** Seconds the player must hold SkipAction before the skip triggers. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Skip", meta=(ClampMin="0.1", UIMin="0.1"))

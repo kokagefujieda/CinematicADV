@@ -2,8 +2,8 @@
 
 #include "ADVSubsystem.h"
 #include "ADVUserSettings.h"
+#include "ADVSaveGame.h"
 #include "CinematicADVConfig.h"
-#include "CinematicADVSettings.h"
 #include "SSkipGaugeWidget.h"
 #include "SADVBacklogWidget.h"
 #include "LevelSequencePlayer.h"
@@ -18,7 +18,6 @@
 #include "Engine/GameViewportClient.h"
 #include "Camera/PlayerCameraManager.h"
 #include "GameFramework/PlayerController.h"
-#include "AssetRegistry/AssetRegistryModule.h"
 #include "Widgets/SOverlay.h"
 #include "EngineUtils.h"
 #include "LevelSequenceActor.h"
@@ -53,6 +52,7 @@ void UADVSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 			if (Params.World && Params.World->GetGameInstance() == GetGameInstance())
 			{
 				BindSubtitleEvents(Params.World);
+				ApplyVoiceVolume(Params.World);
 			}
 		});
 }
@@ -69,6 +69,7 @@ void UADVSubsystem::Deinitialize()
 	bFastForwardHeld    = false;
 	UpdateFastForward();
 	BindSubtitleEvents(nullptr);
+	RemoveVoiceVolume(VoiceVolumeWorld.Get());
 	SaveSystemData(/*bAsync*/ false);
 	Super::Deinitialize();
 }
@@ -100,6 +101,8 @@ void UADVSubsystem::HandleWorldCleanup(UWorld* World, bool bSessionEnded, bool b
 	{
 		BindSubtitleEvents(nullptr);
 	}
+
+	RemoveVoiceVolume(World);
 }
 
 // ---------------------------------------------------------------------------
@@ -162,48 +165,7 @@ UCinematicADVConfig* UADVSubsystem::ResolveConfig()
 {
 	if (Config) { return Config; }
 
-	// 1. Project Settings (this reference is what gets the asset into packaged builds)
-	if (const UCinematicADVSettings* Settings = UCinematicADVSettings::Get())
-	{
-		Config = Settings->ConfigAsset.LoadSynchronous();
-	}
-
-	// 2. Fallback: search the Asset Registry.
-	//    /Game/ paths take priority over plugin Content paths; multiple /Game/ configs → warn and abort.
-	if (!Config)
-	{
-		if (FAssetRegistryModule* ARModule = FModuleManager::GetModulePtr<FAssetRegistryModule>("AssetRegistry"))
-		{
-			TArray<FAssetData> AllAssets;
-			ARModule->Get().GetAssetsByClass(UCinematicADVConfig::StaticClass()->GetClassPathName(), AllAssets);
-
-			TArray<FAssetData> UserAssets;
-			TArray<FAssetData> PluginAssets;
-			for (const FAssetData& Asset : AllAssets)
-			{
-				if (Asset.PackagePath.ToString().StartsWith(TEXT("/Game/")))
-					UserAssets.Add(Asset);
-				else
-					PluginAssets.Add(Asset);
-			}
-
-			if (UserAssets.Num() == 1)
-			{
-				Config = Cast<UCinematicADVConfig>(UserAssets[0].GetAsset());
-			}
-			else if (UserAssets.Num() > 1)
-			{
-				UE_LOG(LogTemp, Warning,
-					TEXT("[CinematicADV] %d UCinematicADVConfig assets found under /Game/. "
-					     "Set one in Project Settings → Plugins → CinematicADV → Config Asset."),
-					UserAssets.Num());
-			}
-			else if (PluginAssets.Num() > 0)
-			{
-				Config = Cast<UCinematicADVConfig>(PluginAssets[0].GetAsset());
-			}
-		}
-	}
+	Config = UCinematicADVConfig::FindConfig();
 
 	if (Config)
 	{
@@ -435,17 +397,23 @@ void UADVSubsystem::JumpToNextWait()
 	if (!Next) { return; }
 
 	// Wait on it as if it had been reached by playing
-	ActiveDisplayRate  = Now.Rate;
-	ActiveSectionStart = ActiveDisplayRate.AsFrameTime(Next->Start);
-	ActiveSectionEnd   = ActiveDisplayRate.AsFrameTime(Next->End);
-	ActiveSectionKey   = Next->Key;
-	ActiveMode         = Next->Mode;
-	bSectionActive     = true;
-	ResetAutoTimer();
-	BacklogSlotsAtWait.Reset();
+	EnterWait(*Next, Now.Rate);
 
 	// The voices jumped over were not heard (auto mode then waits as for a line without a voice)
-	LastWaitEndSeconds = ActiveMode == EClickWaitMode::Stop ? Next->End : Next->Start;
+	LastWaitEndSeconds = Next->Mode == EClickWaitMode::Stop ? Next->End : Next->Start;
+}
+
+void UADVSubsystem::EnterWait(const FADVWaitPoint& Wait, FFrameRate DisplayRate)
+{
+	ActiveDisplayRate  = DisplayRate;
+	ActiveSectionStart = ActiveDisplayRate.AsFrameTime(Wait.Start);
+	ActiveSectionEnd   = ActiveDisplayRate.AsFrameTime(Wait.End);
+	ActiveSectionKey   = Wait.Key;
+	ActiveMode         = Wait.Mode;
+	bSectionActive     = true;
+	bAdvanceRequested  = false;
+	ResetAutoTimer();
+	BacklogSlotsAtWait.Reset();
 
 	if (ActiveMode == EClickWaitMode::Stop)
 	{
@@ -1196,6 +1164,68 @@ bool UADVSubsystem::GetSkipUnread() const
 }
 
 // ---------------------------------------------------------------------------
+// Voice volume
+// ---------------------------------------------------------------------------
+
+void UADVSubsystem::SetVoiceVolume(float Volume)
+{
+	UADVUserSettings* Settings = GetMutableDefault<UADVUserSettings>();
+	Settings->VoiceVolume = FMath::Clamp(Volume, 0.0f, 1.0f);
+	Settings->SaveConfig();
+
+	ApplyVoiceVolume(GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr);
+}
+
+float UADVSubsystem::GetVoiceVolume() const
+{
+	return FMath::Clamp(GetDefault<UADVUserSettings>()->VoiceVolume, 0.0f, 1.0f);
+}
+
+void UADVSubsystem::ApplyVoiceVolume(UWorld* World)
+{
+	if (!World) { return; }
+
+	// Tried for this world (also when there is nothing to apply)
+	VoiceVolumeWorld = World;
+
+	ResolveConfig();
+	if (!Config || Config->VoiceSoundClasses.Num() == 0) { return; }
+
+	if (!VoiceVolumeMix)
+	{
+		VoiceVolumeMix = NewObject<USoundMix>(this);
+	}
+
+	const float Volume = GetVoiceVolume();
+	for (USoundClass* VoiceClass : Config->VoiceSoundClasses)
+	{
+		if (VoiceClass)
+		{
+			UGameplayStatics::SetSoundMixClassOverride(World, VoiceVolumeMix, VoiceClass,
+				Volume, /*Pitch*/ 1.0f, /*FadeInTime*/ 0.0f, /*bApplyToChildren*/ true);
+		}
+	}
+
+	if (!bVoiceVolumePushed)
+	{
+		UGameplayStatics::PushSoundMixModifier(World, VoiceVolumeMix);
+		bVoiceVolumePushed = true;
+	}
+}
+
+void UADVSubsystem::RemoveVoiceVolume(UWorld* World)
+{
+	if (!World || World != VoiceVolumeWorld.Get()) { return; }
+
+	if (bVoiceVolumePushed && VoiceVolumeMix)
+	{
+		UGameplayStatics::PopSoundMixModifier(World, VoiceVolumeMix);
+	}
+	bVoiceVolumePushed = false;
+	VoiceVolumeWorld.Reset();
+}
+
+// ---------------------------------------------------------------------------
 // Read history (system data)
 // ---------------------------------------------------------------------------
 
@@ -1426,6 +1456,16 @@ void UADVSubsystem::Tick(float DeltaTime)
 
 	// Fast-forward on / off (also stops at an unread line found during this frame's evaluation)
 	UpdateFastForward();
+
+	// Player's voice volume for this world (normally applied when the world starts)
+	UWorld* GameWorld = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
+	if (GameWorld && GameWorld != VoiceVolumeWorld.Get())
+	{
+		ApplyVoiceVolume(GameWorld);
+	}
+
+	// A loaded game resumes once its level has begun play
+	TickPendingLoad();
 
 	// Keep the read history
 	if (bSystemDataDirty)

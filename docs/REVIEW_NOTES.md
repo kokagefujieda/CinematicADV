@@ -269,7 +269,7 @@
 - 早送り中と終わった後の音声（3 つの設定それぞれ）
 - 早送り中にバックログを開いたとき、シーケンスが終わったとき
 
-## A5 セーブ／ロード（計画）
+## A5 セーブ／ロード（実装済み・未ビルド）
 
 **決定（2026-09-30）:**
 - 画面: **BP 関数だけ**（保存、読み込み、スロットの情報＝日時・最後の台詞・サムネイル）。画面はゲームごとに UMG で作る。
@@ -308,3 +308,39 @@
 - `SaveGameToSlot` / `LoadGameFromSlot` / `DoesSaveSlotExist` / `DeleteSaveSlot` / `GetSaveSlotInfo` / `CaptureSaveThumbnail` / `IsLoadingGame`
 - `SetStringVariable` / `GetStringVariable`、`SetNumberVariable` / `GetNumberVariable`、`SetFlag` / `GetFlag`、`ClearVariables`
 - イベント: `OnGameSaved` / `OnGameLoaded`（再開した後）
+
+## ボイス用サウンドクラス・ボイス音量（実装済み・未ビルド。SC_Voice はユーザー待ち）
+
+**決定（2026-09-30）:**
+- `SC_Voice`（サウンドクラス）は、**ユーザーがローカルの UE 5.7 で作って push する**（ここでは .uasset を作れないため。Git でやりとりする）。
+  - 置き場所: `Content/Audio/SC_Voice.uasset`（プラグイン内。パスは `/CinematicADV/Audio/SC_Voice`）
+- コンテンツブラウザでサウンドを右クリック → **「ボイスに設定」**（選んだサウンドのサウンドクラスを、まとめてボイス用にする）
+- プレイヤー向けの**ボイス音量**を付ける。
+
+### 実装方針
+- Config の `VoiceSoundClasses` の既定値を、同梱の `SC_Voice` にする（C++ のコンストラクタで設定）。
+  - 既存の `DA_CinematicADVConfig` は、この項目を保存していないので、既定値（`SC_Voice`）がそのまま使われる。アセットを開いて設定し直す必要はない。
+- 右クリックのメニュー: `VoiceSoundClasses` にあるサウンドクラスごとに項目を出す。元に戻せる操作にする。
+  - Config が見つからない、または一覧が空の場合は、メニューに説明の項目を出す。
+- Config の探し方（プロジェクト設定 → AssetRegistry）は、ランタイムとエディタで共通の関数にまとめる（`UCinematicADVConfig::FindConfig`）。
+- ボイス音量: `UADVUserSettings::VoiceVolume`（0〜1、GameUserSettings.ini）。BP の `SetVoiceVolume` / `GetVoiceVolume`。
+  - 実行時に作ったサウンドミックスで、`VoiceSoundClasses` の音量を変える。ワールドごとに適用し、ワールドの破棄時に外す。
+  - 早送りのミュート（ボイスのサウンドクラスだけ）とは、掛け算で重なる。
+
+### A5・ボイスの実装で決めたこと
+- セーブ中（`LoadGameFromSlot` の後、再開まで）は、`SaveGameToSlot` を受け付けない（false を返す）。
+- 保存した待機が見つからない（シーケンスを編集して待機を動かした）場合は、保存した時刻から再生を続ける。許容誤差は 1 フレーム。
+- スロットの情報は、セーブを丸ごと読んで返す（サムネイルもその場でテクスチャにする）。スロット数が多いと、一覧を開くときに少し止まる可能性がある。
+- サムネイルは、撮り直すまで使い回す。セーブ画面を開くたびに `CaptureSaveThumbnail` を呼んでもらう。
+- 変数は `FADVVariables`（文字列・数値・フラグの 3 つの Map）。`GetAllVariables` でまとめて取れる。
+- ボイス音量は、ワールドが始まるとき（アクターの初期化時）に適用し、ワールドの破棄時に外す。
+- Config の探し方を `UCinematicADVConfig::FindConfig` にまとめ、ランタイムと右クリックのメニューで共通にした。
+- `SC_Voice` がまだないので、今は Config の既定値の読み込みで「見つからない」というエラーがログに出る。push してもらえば消える。
+
+### 確認してほしいこと
+- ビルド（特に `UE::ContentBrowser::ExtendToolMenu_AssetContextMenu`、`UContentBrowserAssetContextMenuContext`、`FImageUtils::ImageResize` / `PNGCompressImageArray` / `ImportBufferAsTexture2D`、`UGameViewportClient::OnScreenshotCaptured`、`UWorld::RemovePIEPrefix`、`ConstructorHelpers::FObjectFinderOptional`）
+- セーブ → 別のレベルでロード → 同じ待機で全文表示で待つか。Loop の待機、待機の外、ショットの中
+- ロード後のバックログと変数、`IsLoadingGame`、`OnGameLoaded`
+- サムネイル（UI が写らないか、スロット情報で表示できるか）
+- PIE とパッケージ版の両方（レベルのパスの PIE の接頭辞）
+- 右クリック「Set as Voice」（複数選択、Undo、保存）と、ボイス音量（`SetVoiceVolume`）の反映・保存

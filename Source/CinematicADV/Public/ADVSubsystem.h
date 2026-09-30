@@ -11,6 +11,7 @@
 #include "ClickWaitSection.h"
 #include "CinematicADVConfig.h"
 #include "SubtitleSettings.h"
+#include "ADVTypes.h"
 #include "ADVSubsystem.generated.h"
 
 class ULevelSequencePlayer;
@@ -26,28 +27,13 @@ class USoundBase;
 class UAudioComponent;
 class USoundMix;
 class UADVSystemSaveGame;
-
-/** One line in the backlog. */
-USTRUCT(BlueprintType)
-struct CINEMATICADV_API FADVBacklogEntry
-{
-	GENERATED_BODY()
-
-	UPROPERTY(BlueprintReadOnly, Category="CinematicADV|Backlog")
-	FText SpeakerName;
-
-	UPROPERTY(BlueprintReadOnly, Category="CinematicADV|Backlog")
-	FText Text;
-
-	/** Voice of the line (empty if the line has no voice). */
-	UPROPERTY(BlueprintReadOnly, Category="CinematicADV|Backlog")
-	TObjectPtr<USoundBase> Voice;
-};
+class UADVSaveGame;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnADVAutoModeChanged, bool, bAutoMode);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnADVBacklogEntryAdded, const FADVBacklogEntry&, Entry);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnADVBacklogEvent);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnADVFastForwardChanged, bool, bFastForwarding);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnADVSaveSlotEvent, int32, SlotIndex);
 
 /** One Click Wait section in the player's root time (seconds). */
 struct FADVWaitPoint
@@ -206,6 +192,88 @@ public:
 	UFUNCTION(BlueprintCallable, Category="CinematicADV|FastForward")
 	void ClearReadHistory();
 
+	// --- Voice volume ---
+
+	/** Player option: volume of the voice Sound Classes (Config: VoiceSoundClasses), 0 - 1. Saved at once. */
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Voice")
+	void SetVoiceVolume(float Volume);
+
+	UFUNCTION(BlueprintPure, Category="CinematicADV|Voice")
+	float GetVoiceVolume() const;
+
+	// --- Save / Load ---
+
+	/**
+	 * Save to a slot: the level, the ADV sequence and its position (at a wait: that wait), the backlog and the variables.
+	 * Call Capture Save Thumbnail before opening your save screen to add a picture.
+	 */
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Save")
+	bool SaveGameToSlot(int32 SlotIndex);
+
+	/**
+	 * Load a slot: the variables and the backlog come back at once, then the saved level is opened and the sequence
+	 * resumes at the saved wait (On Game Loaded fires then). Event Track events before that point are not run again.
+	 */
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Save")
+	bool LoadGameFromSlot(int32 SlotIndex);
+
+	UFUNCTION(BlueprintPure, Category="CinematicADV|Save")
+	bool DoesSaveSlotExist(int32 SlotIndex);
+
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Save")
+	bool DeleteSaveSlot(int32 SlotIndex);
+
+	/** Date, last line, level and thumbnail of a slot. false if the slot is empty. */
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Save")
+	bool GetSaveSlotInfo(int32 SlotIndex, FADVSaveSlotInfo& OutInfo);
+
+	/**
+	 * Take the picture for the next saves (the game screen without UI, ready on the next frame).
+	 * Call it before your save screen opens so the screen itself is not in the picture.
+	 */
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Save")
+	void CaptureSaveThumbnail();
+
+	/** true from Load Game From Slot until the sequence has resumed. Check it before starting your own sequence in BeginPlay. */
+	UFUNCTION(BlueprintPure, Category="CinematicADV|Save")
+	bool IsLoadingGame() const { return PendingLoad != nullptr; }
+
+	UPROPERTY(BlueprintAssignable, Category="CinematicADV|Save")
+	FOnADVSaveSlotEvent OnGameSaved;
+
+	/** Fires after a loaded game has resumed (level opened, sequence at the saved position). */
+	UPROPERTY(BlueprintAssignable, Category="CinematicADV|Save")
+	FOnADVSaveSlotEvent OnGameLoaded;
+
+	// --- Variables (saved with the game) ---
+
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Variables")
+	void SetStringVariable(FName Name, const FString& Value);
+
+	UFUNCTION(BlueprintPure, Category="CinematicADV|Variables")
+	FString GetStringVariable(FName Name, const FString& DefaultValue) const;
+
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Variables")
+	void SetNumberVariable(FName Name, double Value);
+
+	UFUNCTION(BlueprintPure, Category="CinematicADV|Variables")
+	double GetNumberVariable(FName Name, double DefaultValue = 0.0) const;
+
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Variables")
+	void SetFlag(FName Name, bool bValue);
+
+	/** false if the flag was never set. */
+	UFUNCTION(BlueprintPure, Category="CinematicADV|Variables")
+	bool GetFlag(FName Name) const;
+
+	/** All variables (e.g. for a debug display). */
+	UFUNCTION(BlueprintPure, Category="CinematicADV|Variables")
+	FADVVariables GetAllVariables() const { return Variables; }
+
+	/** Forget all variables (e.g. for a new game). */
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|Variables")
+	void ClearVariables();
+
 	// --- Called internally by FClickWaitEvalTemplate ---
 
 	/**
@@ -255,6 +323,9 @@ private:
 	void JumpToWaitPosition();
 	void JumpToNextWait();
 
+	/** Wait on a wait section as if it had been reached by playing (Stop: at its end, Loop: from its start). */
+	void EnterWait(const FADVWaitPoint& Wait, FFrameRate DisplayRate);
+
 	/** Leave the current wait and play on from its end (click or auto). */
 	void AdvancePastWait();
 
@@ -299,6 +370,17 @@ private:
 	/** Marks a line read; returns true if it had not been read before. */
 	bool MarkLineRead(const FString& LineKey);
 	void SaveSystemData(bool bAsync);
+
+	// Voice volume
+	void ApplyVoiceVolume(UWorld* World);
+	void RemoveVoiceVolume(UWorld* World);
+
+	// Save / Load
+	FString GetSaveSlotName(int32 SlotIndex);
+	static FString GetWorldLevelPath(const UWorld* World);
+	void TickPendingLoad();
+	void RestoreFromSave(UWorld* World, UADVSaveGame* Save);
+	void HandleScreenshotCaptured(int32 Width, int32 Height, const TArray<FColor>& Colors);
 	void ShowBacklogUI();
 	void HideBacklogUI();
 
@@ -410,6 +492,27 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<USoundMix> FastForwardSoundMix;
+
+	// Voice volume
+	UPROPERTY()
+	TObjectPtr<USoundMix> VoiceVolumeMix;
+	/** World the voice volume was last applied for. */
+	TWeakObjectPtr<UWorld> VoiceVolumeWorld;
+	bool         bVoiceVolumePushed = false;
+
+	// Save / Load
+	UPROPERTY()
+	FADVVariables Variables;
+
+	/** Loaded save waiting for its level to begin play. */
+	UPROPERTY()
+	TObjectPtr<UADVSaveGame> PendingLoad;
+	int32        PendingLoadSlot = -1;
+	TWeakObjectPtr<UWorld> PendingLoadFromWorld;
+
+	/** PNG taken by CaptureSaveThumbnail. */
+	TArray<uint8>   PendingThumbnail;
+	FDelegateHandle ScreenshotHandle;
 
 	// Read history
 	UPROPERTY()
