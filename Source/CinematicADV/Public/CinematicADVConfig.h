@@ -21,6 +21,18 @@ enum class EADVClickOutsideWait : uint8
 	DoNothing      UMETA(DisplayName = "Do Nothing"),
 };
 
+/** What to do with the sound while fast-forwarding. */
+UENUM(BlueprintType)
+enum class EADVFastForwardAudio : uint8
+{
+	/** Mute all game audio. */
+	MuteAll          UMETA(DisplayName = "Mute All"),
+	/** Mute the Sound Classes listed in VoiceSoundClasses (and their children). */
+	MuteVoiceClasses UMETA(DisplayName = "Mute Voice Sound Classes"),
+	/** Leave the sound as it is. */
+	KeepPlaying      UMETA(DisplayName = "Keep Playing"),
+};
+
 /**
  * CinematicADV configuration DataAsset.
  *
@@ -145,6 +157,28 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Backlog|UI", meta=(EditCondition="bUseBuiltInBacklogUI"))
 	FLinearColor BacklogSpeakerColor = FLinearColor(1.f, 0.85f, 0.5f, 1.f);
+
+	/** Input Action that fast-forwards while it is held. Must be mapped to a key inside InputMappingContext. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Fast Forward")
+	TObjectPtr<UInputAction> FastForwardAction;
+
+	/** Input Action that turns fast-forward on / off. Must be mapped to a key inside InputMappingContext. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Fast Forward")
+	TObjectPtr<UInputAction> FastForwardToggleAction;
+
+	/**
+	 * Play rate multiplier while fast-forwarding. Waits are passed at once.
+	 * Fast-forward stops at a line not read yet, unless the player chose to skip unread lines (Set Skip Unread).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Fast Forward", meta=(ClampMin="1.0", UIMin="1.0"))
+	float FastForwardRate = 8.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Fast Forward")
+	EADVFastForwardAudio FastForwardAudio = EADVFastForwardAudio::MuteAll;
+
+	/** Save slot of the system data (read history), shared by all save slots. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Fast Forward")
+	FString SystemSaveSlotName = TEXT("CinematicADV_System");
 
 	/** Seconds the player must hold SkipAction before the skip triggers. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Skip", meta=(ClampMin="0.1", UIMin="0.1"))

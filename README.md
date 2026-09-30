@@ -12,6 +12,8 @@ It adds click-to-advance and skip to Sequencer cinematics. More ADV features are
   based on the number of characters. Toggle with a key or from Blueprint
 - **Backlog** — read past lines (kept while the game runs) and replay their voices. Built-in screen, or your own UMG
   from the recorded data. The sequence pauses while it is open
+- **Fast-forward / skip read text** — hold a key (or toggle) to play fast and pass waits at once. Stops at lines not read
+  yet (players can choose to skip them too). The read history is kept in its own save file
 - **Hold to skip** — hold the skip key to fade out and stop the whole sequence (with a circular gauge)
 - **Setup without Blueprint** — one DataAsset for the input mapping and actions
 - Works in sub-sequences (shots) and across level travel
@@ -23,7 +25,7 @@ In this order:
 1. ~~First click shows the whole text, second click advances~~ (done)
 2. ~~Auto mode~~ (done)
 3. ~~Backlog~~ (done)
-4. Fast-forward / skip read text
+4. ~~Fast-forward / skip read text~~ (done)
 5. Save / Load
 6. Choices (branching)
 
@@ -49,6 +51,8 @@ Sequencer で制作したシネマティックに、クリック送りとスキ�
   キーまたは Blueprint で ON/OFF
 - **バックログ** — 過去の台詞を読み返し、ボイスを再生し直せる（ゲームの起動中は保持）。組み込みの画面のほか、
   記録を取り出して自作の UMG でも表示できる。開いている間はシーケンスを一時停止
+- **早送り・既読スキップ** — キーを押している間（または切り替え）高速再生し、待機はすぐに通過。未読の台詞で止まる
+  （プレイヤーの設定で未読も飛ばせる）。既読は専用のセーブファイルに保存
 - **長押しスキップ** — スキップキーの長押しで、フェードアウトしてシーケンス全体を停止（円形ゲージ付き）
 - **Blueprint 不要のセットアップ** — 入力の割り当ては DataAsset 1 つで設定
 - サブシーケンス（ショット）の中や、レベル移動後も動作
@@ -60,7 +64,7 @@ Sequencer で制作したシネマティックに、クリック送りとスキ�
 1. ~~1 回目のクリックで文章を全部表示、2 回目で次へ~~（対応済み）
 2. ~~オートモード~~（対応済み）
 3. ~~バックログ~~（対応済み）
-4. 早送り・既読スキップ
+4. ~~早送り・既読スキップ~~（対応済み）
 5. セーブ / ロード
 6. 選択肢（分岐）
 

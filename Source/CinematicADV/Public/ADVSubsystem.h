@@ -24,6 +24,8 @@ class UMovieSceneSection;
 class USubtitleSubsystem;
 class USoundBase;
 class UAudioComponent;
+class USoundMix;
+class UADVSystemSaveGame;
 
 /** One line in the backlog. */
 USTRUCT(BlueprintType)
@@ -45,6 +47,7 @@ struct CINEMATICADV_API FADVBacklogEntry
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnADVAutoModeChanged, bool, bAutoMode);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnADVBacklogEntryAdded, const FADVBacklogEntry&, Entry);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnADVBacklogEvent);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnADVFastForwardChanged, bool, bFastForwarding);
 
 /** One Click Wait section in the player's root time (seconds). */
 struct FADVWaitPoint
@@ -172,6 +175,37 @@ public:
 	UPROPERTY(BlueprintAssignable, Category="CinematicADV|Backlog")
 	FOnADVBacklogEvent OnBacklogClosed;
 
+	// --- Fast forward / read history ---
+
+	/**
+	 * Fast-forward mode (the toggle; FastForwardAction also fast-forwards while held).
+	 * Turns itself off at a line not read yet (unless Skip Unread) and when the sequence ends.
+	 */
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|FastForward")
+	void SetFastForwardMode(bool bEnabled);
+
+	UFUNCTION(BlueprintPure, Category="CinematicADV|FastForward")
+	bool IsFastForwardMode() const { return bFastForwardToggled; }
+
+	/** true while the sequence is actually being fast-forwarded (toggle or key held). */
+	UFUNCTION(BlueprintPure, Category="CinematicADV|FastForward")
+	bool IsFastForwarding() const { return bFastForwardActive; }
+
+	/** Fires when fast-forwarding starts or stops (to show a "SKIP" indicator, etc.). */
+	UPROPERTY(BlueprintAssignable, Category="CinematicADV|FastForward")
+	FOnADVFastForwardChanged OnFastForwardChanged;
+
+	/** Player option: fast-forward also skips lines not read yet. Saved at once (GameUserSettings.ini). */
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|FastForward")
+	void SetSkipUnread(bool bSkipUnread);
+
+	UFUNCTION(BlueprintPure, Category="CinematicADV|FastForward")
+	bool GetSkipUnread() const;
+
+	/** Forget which lines have been read (all save slots share it). */
+	UFUNCTION(BlueprintCallable, Category="CinematicADV|FastForward")
+	void ClearReadHistory();
+
 	// --- Called internally by FClickWaitEvalTemplate ---
 
 	/**
@@ -224,6 +258,9 @@ private:
 	/** Leave the current wait and play on from its end (click or auto). */
 	void AdvancePastWait();
 
+	/** Stop: paused at the section end. Loop: inside the section. */
+	bool IsWaitReached(UMovieSceneSequencePlayer* Player) const;
+
 	// Auto mode
 	void TickAuto(UMovieSceneSequencePlayer* Player, float DeltaTime);
 	void ResetAutoTimer();
@@ -240,10 +277,28 @@ private:
 	UFUNCTION()
 	void HandleSubtitleSlotStarted(int32 SlotID, const FText& SubtitleText, const FText& SpeakerName, const FSubtitleAppearance& Appearance);
 
-	/** Voice of a subtitle section (SlotID = its UniqueID): the voice starting closest to the line. */
-	USoundBase* FindLineVoice(UMovieSceneSequencePlayer* Player, uint32 SlotID) const;
+	/**
+	 * A subtitle section (SlotID = its UniqueID): its key for the read history (path name) and its voice
+	 * (the voice starting closest to the line).
+	 */
+	void FindLineInfo(UMovieSceneSequencePlayer* Player, uint32 SlotID, FString& OutLineKey, USoundBase*& OutVoice) const;
 
 	void AddBacklogEntryInternal(const FADVBacklogEntry& Entry);
+
+	// Fast forward
+	void OnFastForwardPressed();
+	void OnFastForwardReleased();
+	void ToggleFastForwardMode();
+	/** Apply the wanted fast-forward state to the player and the sound. */
+	void UpdateFastForward();
+	void SetFastForwardAudio(bool bMute);
+
+	// Read history (system data)
+	UADVSystemSaveGame* GetSystemData();
+	FString GetSystemSlotName() const;
+	/** Marks a line read; returns true if it had not been read before. */
+	bool MarkLineRead(const FString& LineKey);
+	void SaveSystemData(bool bAsync);
 	void ShowBacklogUI();
 	void HideBacklogUI();
 
@@ -339,6 +394,28 @@ private:
 	bool         bResumeAfterBacklog   = false;
 	bool         bBacklogChangedCursor = false;
 	bool         bSavedShowMouseCursor = false;
+
+	// Fast forward
+	bool         bFastForwardToggled = false;
+	bool         bFastForwardHeld    = false;
+	/** Stopped at an unread line while the key is held: waits for the key to be released. */
+	bool         bFastForwardBlocked = false;
+	bool         bFastForwardActive  = false;
+	float        FastForwardSavedPlayRate = 1.0f;
+	TWeakObjectPtr<UMovieSceneSequencePlayer> FastForwardPlayer;
+
+	bool         bFastForwardMutedAll   = false;
+	float        FastForwardSavedVolume = 1.0f;
+	bool         bFastForwardMixPushed  = false;
+
+	UPROPERTY()
+	TObjectPtr<USoundMix> FastForwardSoundMix;
+
+	// Read history
+	UPROPERTY()
+	TObjectPtr<UADVSystemSaveGame> SystemData;
+	bool         bSystemDataDirty  = false;
+	float        SystemSaveElapsed = 0.0f;
 
 	float        SkipHoldElapsed = 0.0f;
 	FTimerHandle SkipFadeTimerHandle;

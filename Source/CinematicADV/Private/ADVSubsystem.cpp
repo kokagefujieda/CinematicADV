@@ -1,6 +1,7 @@
 // Copyright 2026 kokage. All Rights Reserved.
 
 #include "ADVSubsystem.h"
+#include "ADVUserSettings.h"
 #include "CinematicADVConfig.h"
 #include "CinematicADVSettings.h"
 #include "SSkipGaugeWidget.h"
@@ -33,6 +34,8 @@
 #include "Components/AudioComponent.h"
 #include "Styling/CoreStyle.h"
 #include "Engine/Font.h"
+#include "AudioDevice.h"
+#include "Sound/SoundMix.h"
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -62,7 +65,11 @@ void UADVSubsystem::Deinitialize()
 	bResumeAfterBacklog = false;
 	CloseBacklog();
 	ClearActivePlayer();
+	bFastForwardToggled = false;
+	bFastForwardHeld    = false;
+	UpdateFastForward();
 	BindSubtitleEvents(nullptr);
+	SaveSystemData(/*bAsync*/ false);
 	Super::Deinitialize();
 }
 
@@ -78,6 +85,11 @@ void UADVSubsystem::HandleWorldCleanup(UWorld* World, bool bSessionEnded, bool b
 	}
 
 	// The player may be destroyed without OnStop (level travel)
+	if (Player && Player->GetWorld() == World)
+	{
+		bFastForwardToggled = false;
+		SaveSystemData(/*bAsync*/ true);
+	}
 	if (!Player || Player->GetWorld() == World)
 	{
 		ClearActivePlayer();
@@ -135,6 +147,9 @@ void UADVSubsystem::ClearActivePlayer()
 	ResetAutoTimer();
 	BacklogSlotsAtWait.Reset();
 	bResumeAfterBacklog = false;
+
+	// Back to the normal play rate and sound (the old player)
+	UpdateFastForward();
 
 	RemoveInputContext();
 }
@@ -241,6 +256,16 @@ void UADVSubsystem::EnsureInputBound()
 	if (Cfg->BacklogAction)
 	{
 		EIC->BindAction(Cfg->BacklogAction, ETriggerEvent::Started, this, &UADVSubsystem::ToggleBacklog);
+	}
+	if (Cfg->FastForwardAction)
+	{
+		EIC->BindAction(Cfg->FastForwardAction, ETriggerEvent::Started,   this, &UADVSubsystem::OnFastForwardPressed);
+		EIC->BindAction(Cfg->FastForwardAction, ETriggerEvent::Completed, this, &UADVSubsystem::OnFastForwardReleased);
+		EIC->BindAction(Cfg->FastForwardAction, ETriggerEvent::Canceled,  this, &UADVSubsystem::OnFastForwardReleased);
+	}
+	if (Cfg->FastForwardToggleAction)
+	{
+		EIC->BindAction(Cfg->FastForwardToggleAction, ETriggerEvent::Started, this, &UADVSubsystem::ToggleFastForwardMode);
 	}
 	BoundController = PC;
 }
@@ -551,11 +576,15 @@ void UADVSubsystem::ResetAutoTimer()
 	AutoDelay   = -1.0f;
 }
 
-void UADVSubsystem::TickAuto(UMovieSceneSequencePlayer* Player, float DeltaTime)
+bool UADVSubsystem::IsWaitReached(UMovieSceneSequencePlayer* Player) const
 {
 	// Stop: the wait is reached once the player has paused at the section end. Loop: as soon as it is entered.
-	const bool bReached = ActiveMode == EClickWaitMode::Loop || (Player->IsPaused() && IsAtSectionEnd(Player));
-	if (!bReached || IsTextRevealing()) { return; }
+	return ActiveMode == EClickWaitMode::Loop || (Player->IsPaused() && IsAtSectionEnd(Player));
+}
+
+void UADVSubsystem::TickAuto(UMovieSceneSequencePlayer* Player, float DeltaTime)
+{
+	if (!IsWaitReached(Player) || IsTextRevealing()) { return; }
 
 	if (AutoDelay < 0.0f)
 	{
@@ -738,6 +767,23 @@ void UADVSubsystem::HandleSubtitleSlotStarted(int32 SlotID, const FText& Subtitl
 	UMovieSceneSequencePlayer* Player = ActivePlayer.Get();
 	if (!Player) { return; }
 
+	ResolveConfig();
+
+	FString     LineKey;
+	USoundBase* Voice = nullptr;
+	if (SlotID != 0)
+	{
+		FindLineInfo(Player, static_cast<uint32>(SlotID), LineKey, Voice);
+	}
+
+	// Read history: a line shown for the first time stops fast-forward (unless unread lines are skipped too)
+	if (!LineKey.IsEmpty() && MarkLineRead(LineKey) && !GetSkipUnread())
+	{
+		// Applied in Tick, before the next frame is evaluated
+		bFastForwardToggled = false;
+		bFastForwardBlocked = bFastForwardHeld;
+	}
+
 	if (SlotID != 0)
 	{
 		// A subtitle section restarted at the same wait (Loop) is the same line
@@ -753,44 +799,45 @@ void UADVSubsystem::HandleSubtitleSlotStarted(int32 SlotID, const FText& Subtitl
 		return;
 	}
 
-	ResolveConfig();
-
 	FADVBacklogEntry Entry;
 	Entry.SpeakerName = SpeakerName;
 	Entry.Text        = SubtitleText;
-	Entry.Voice       = SlotID != 0 ? FindLineVoice(Player, static_cast<uint32>(SlotID)) : nullptr;
+	Entry.Voice       = Voice;
 	AddBacklogEntryInternal(Entry);
 }
 
-USoundBase* UADVSubsystem::FindLineVoice(UMovieSceneSequencePlayer* Player, uint32 SlotID) const
+void UADVSubsystem::FindLineInfo(UMovieSceneSequencePlayer* Player, uint32 SlotID, FString& OutLineKey, USoundBase*& OutVoice) const
 {
-	struct FTimedSound
+	OutLineKey.Reset();
+	OutVoice = nullptr;
+
+	struct FTimedSection
 	{
-		double      Start;
-		double      End;
-		USoundBase* Sound;
+		double                    Start;
+		double                    End;
+		const UMovieSceneSection* Section;
 	};
 
 	// The line's section (a sub-sequence used twice appears twice) and the voices
-	TArray<FTimedSound> LineRanges;
-	TArray<FTimedSound> Voices;
+	TArray<FTimedSection> LineRanges;
+	TArray<FTimedSection> Voices;
 	ForEachSectionInRootTime(Player->GetSequence(), [&](const UMovieSceneSection* Section, double Start, double End)
 	{
 		if (Section->GetUniqueID() == SlotID && Section->IsA<UMovieSceneSeqSubtitleSection>())
 		{
-			LineRanges.Add({ Start, End, nullptr });
+			LineRanges.Add({ Start, End, Section });
 		}
 		else if (IsVoiceSection(Section))
 		{
-			Voices.Add({ Start, End, CastChecked<UMovieSceneAudioSection>(Section)->GetSound() });
+			Voices.Add({ Start, End, Section });
 		}
 	});
-	if (LineRanges.Num() == 0 || Voices.Num() == 0) { return nullptr; }
+	if (LineRanges.Num() == 0) { return; }
 
 	// The instance playing now
 	const double Now = Player->GetCurrentTime().AsSeconds();
-	const FTimedSound* Line = &LineRanges[0];
-	for (const FTimedSound& Range : LineRanges)
+	const FTimedSection* Line = &LineRanges[0];
+	for (const FTimedSection& Range : LineRanges)
 	{
 		if (Range.Start <= Now + KINDA_SMALL_NUMBER && Now < Range.End)
 		{
@@ -799,10 +846,12 @@ USoundBase* UADVSubsystem::FindLineVoice(UMovieSceneSequencePlayer* Player, uint
 		}
 	}
 
+	// Same in packaged builds (package path + object names)
+	OutLineKey = Line->Section->GetPathName();
+
 	// The voice starting closest to the line (from just before it to its end)
-	USoundBase* Best = nullptr;
 	double BestDistance = TNumericLimits<double>::Max();
-	for (const FTimedSound& Voice : Voices)
+	for (const FTimedSection& Voice : Voices)
 	{
 		if (Voice.Start < Line->Start - 0.25 || Voice.Start >= Line->End) { continue; }
 
@@ -810,10 +859,9 @@ USoundBase* UADVSubsystem::FindLineVoice(UMovieSceneSequencePlayer* Player, uint
 		if (Distance < BestDistance)
 		{
 			BestDistance = Distance;
-			Best = Voice.Sound;
+			OutVoice = CastChecked<UMovieSceneAudioSection>(Voice.Section)->GetSound();
 		}
 	}
-	return Best;
 }
 
 void UADVSubsystem::AddBacklogEntry(const FText& SpeakerName, const FText& Text, USoundBase* Voice)
@@ -861,6 +909,7 @@ void UADVSubsystem::OpenBacklog()
 	{
 		Player->Pause();
 	}
+	UpdateFastForward();
 
 	if (Config && Config->bUseBuiltInBacklogUI)
 	{
@@ -876,6 +925,7 @@ void UADVSubsystem::CloseBacklog()
 	bBacklogOpen = false;
 	StopBacklogVoice();
 	HideBacklogUI();
+	UpdateFastForward();
 
 	if (bResumeAfterBacklog)
 	{
@@ -996,6 +1046,221 @@ void UADVSubsystem::HideBacklogUI()
 				PC->SetInputMode(FInputModeGameOnly());
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fast forward
+// ---------------------------------------------------------------------------
+
+void UADVSubsystem::SetFastForwardMode(bool bEnabled)
+{
+	bFastForwardToggled = bEnabled;
+	UpdateFastForward();
+}
+
+void UADVSubsystem::ToggleFastForwardMode()
+{
+	SetFastForwardMode(!bFastForwardToggled);
+}
+
+void UADVSubsystem::OnFastForwardPressed()
+{
+	bFastForwardHeld    = true;
+	bFastForwardBlocked = false;
+	UpdateFastForward();
+}
+
+void UADVSubsystem::OnFastForwardReleased()
+{
+	bFastForwardHeld    = false;
+	bFastForwardBlocked = false;
+	UpdateFastForward();
+}
+
+void UADVSubsystem::UpdateFastForward()
+{
+	UMovieSceneSequencePlayer* Player = ActivePlayer.Get();
+	const bool bWant = (bFastForwardToggled || (bFastForwardHeld && !bFastForwardBlocked))
+		&& Player && !bBacklogOpen && !bFadeInProgress;
+
+	if (bWant == bFastForwardActive && (!bWant || Player == FastForwardPlayer.Get())) { return; }
+
+	const bool bWasActive = bFastForwardActive;
+
+	// Back to normal on the player it was applied to
+	if (bFastForwardActive)
+	{
+		if (UMovieSceneSequencePlayer* Old = FastForwardPlayer.Get())
+		{
+			Old->SetPlayRate(FastForwardSavedPlayRate);
+		}
+		SetFastForwardAudio(false);
+		FastForwardPlayer.Reset();
+		bFastForwardActive = false;
+	}
+
+	if (bWant)
+	{
+		ResolveConfig();
+		const float Rate = Config ? FMath::Max(Config->FastForwardRate, 1.0f) : 8.0f;
+
+		FastForwardSavedPlayRate = Player->GetPlayRate();
+		Player->SetPlayRate(FastForwardSavedPlayRate * Rate);
+		SetFastForwardAudio(true);
+		FastForwardPlayer  = Player;
+		bFastForwardActive = true;
+	}
+
+	if (bFastForwardActive != bWasActive)
+	{
+		OnFastForwardChanged.Broadcast(bFastForwardActive);
+	}
+}
+
+void UADVSubsystem::SetFastForwardAudio(bool bMute)
+{
+	UWorld* World = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
+
+	if (!bMute)
+	{
+		if (bFastForwardMutedAll)
+		{
+			bFastForwardMutedAll = false;
+			FAudioDeviceHandle Device = World ? World->GetAudioDevice() : (GEngine ? GEngine->GetMainAudioDevice() : FAudioDeviceHandle());
+			if (Device.IsValid())
+			{
+				Device->SetTransientPrimaryVolume(FastForwardSavedVolume);
+			}
+		}
+		if (bFastForwardMixPushed)
+		{
+			bFastForwardMixPushed = false;
+			if (World && FastForwardSoundMix)
+			{
+				UGameplayStatics::PopSoundMixModifier(World, FastForwardSoundMix);
+			}
+		}
+		return;
+	}
+
+	if (!Config || !World) { return; }
+
+	switch (Config->FastForwardAudio)
+	{
+	case EADVFastForwardAudio::MuteAll:
+	{
+		FAudioDeviceHandle Device = World->GetAudioDevice();
+		if (Device.IsValid())
+		{
+			FastForwardSavedVolume = Device->GetTransientPrimaryVolume();
+			Device->SetTransientPrimaryVolume(0.0f);
+			bFastForwardMutedAll = true;
+		}
+		break;
+	}
+	case EADVFastForwardAudio::MuteVoiceClasses:
+	{
+		if (!FastForwardSoundMix)
+		{
+			FastForwardSoundMix = NewObject<USoundMix>(this);
+		}
+		for (USoundClass* VoiceClass : Config->VoiceSoundClasses)
+		{
+			if (VoiceClass)
+			{
+				UGameplayStatics::SetSoundMixClassOverride(World, FastForwardSoundMix, VoiceClass,
+					/*Volume*/ 0.0f, /*Pitch*/ 1.0f, /*FadeInTime*/ 0.0f, /*bApplyToChildren*/ true);
+			}
+		}
+		UGameplayStatics::PushSoundMixModifier(World, FastForwardSoundMix);
+		bFastForwardMixPushed = true;
+		break;
+	}
+	case EADVFastForwardAudio::KeepPlaying:
+	default:
+		break;
+	}
+}
+
+void UADVSubsystem::SetSkipUnread(bool bSkipUnread)
+{
+	UADVUserSettings* Settings = GetMutableDefault<UADVUserSettings>();
+	Settings->bSkipUnread = bSkipUnread;
+	Settings->SaveConfig();
+}
+
+bool UADVSubsystem::GetSkipUnread() const
+{
+	return GetDefault<UADVUserSettings>()->bSkipUnread;
+}
+
+// ---------------------------------------------------------------------------
+// Read history (system data)
+// ---------------------------------------------------------------------------
+
+FString UADVSubsystem::GetSystemSlotName() const
+{
+	return Config && !Config->SystemSaveSlotName.IsEmpty() ? Config->SystemSaveSlotName : FString(TEXT("CinematicADV_System"));
+}
+
+UADVSystemSaveGame* UADVSubsystem::GetSystemData()
+{
+	if (!SystemData)
+	{
+		ResolveConfig();
+		const FString SlotName = GetSystemSlotName();
+		if (UGameplayStatics::DoesSaveGameExist(SlotName, 0))
+		{
+			SystemData = Cast<UADVSystemSaveGame>(UGameplayStatics::LoadGameFromSlot(SlotName, 0));
+		}
+		if (!SystemData)
+		{
+			SystemData = Cast<UADVSystemSaveGame>(UGameplayStatics::CreateSaveGameObject(UADVSystemSaveGame::StaticClass()));
+		}
+	}
+	return SystemData;
+}
+
+bool UADVSubsystem::MarkLineRead(const FString& LineKey)
+{
+	UADVSystemSaveGame* Data = GetSystemData();
+	if (!Data) { return false; }
+
+	bool bAlreadyRead = false;
+	Data->ReadLines.Add(LineKey, &bAlreadyRead);
+	if (!bAlreadyRead)
+	{
+		bSystemDataDirty = true;
+	}
+	return !bAlreadyRead;
+}
+
+void UADVSubsystem::ClearReadHistory()
+{
+	if (UADVSystemSaveGame* Data = GetSystemData())
+	{
+		Data->ReadLines.Reset();
+		bSystemDataDirty = true;
+		SaveSystemData(/*bAsync*/ false);
+	}
+}
+
+void UADVSubsystem::SaveSystemData(bool bAsync)
+{
+	if (!SystemData || !bSystemDataDirty) { return; }
+
+	bSystemDataDirty  = false;
+	SystemSaveElapsed = 0.0f;
+
+	const FString SlotName = GetSystemSlotName();
+	if (bAsync)
+	{
+		UGameplayStatics::AsyncSaveGameToSlot(SystemData, SlotName, 0);
+	}
+	else
+	{
+		UGameplayStatics::SaveGameToSlot(SystemData, SlotName, 0);
 	}
 }
 
@@ -1159,6 +1424,19 @@ void UADVSubsystem::Tick(float DeltaTime)
 	// Record lines for the backlog (normally bound when the world starts; this catches the rest)
 	BindSubtitleEvents(GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr);
 
+	// Fast-forward on / off (also stops at an unread line found during this frame's evaluation)
+	UpdateFastForward();
+
+	// Keep the read history
+	if (bSystemDataDirty)
+	{
+		SystemSaveElapsed += DeltaTime;
+		if (SystemSaveElapsed >= 10.0f)
+		{
+			SaveSystemData(/*bAsync*/ true);
+		}
+	}
+
 	// The sequence and auto mode wait while the backlog is open
 	if (bBacklogOpen) { return; }
 
@@ -1195,6 +1473,16 @@ void UADVSubsystem::Tick(float DeltaTime)
 			LoopToStart();
 		}
 		// Stop: stay paused — waiting for Advance()
+	}
+
+	// Fast-forward: pass the wait at once
+	if (bFastForwardActive)
+	{
+		if (IsWaitReached(Player))
+		{
+			AdvancePastWait();
+		}
+		return;
 	}
 
 	// Auto mode: continue by itself after the delay
@@ -1290,6 +1578,11 @@ void UADVSubsystem::OnPlayerStopped()
 	}
 	bFadeInProgress = false;
 
+	// Fast-forward mode ends with the sequence
+	bFastForwardToggled = false;
+
 	// Forget the player (a later sequence registers itself) and give the keys back to the game
 	ClearActivePlayer();
+
+	SaveSystemData(/*bAsync*/ true);
 }
