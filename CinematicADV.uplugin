@@ -13,7 +13,6 @@
 	"CanContainContent": true,
 	"IsBetaVersion": true,
 	"IsExperimentalVersion": false,
-	"EngineVersion": "5.7.0",
 	"Installed": false,
 	"Plugins": [
 		{
